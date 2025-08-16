@@ -1,0 +1,116 @@
+# @package _group_
+
+common:
+  amp: true
+  log_format: json
+  log_interval: 100
+  tensorboard_logdir: tblog
+  seed: 1337
+  user_dir: ???
+
+checkpoint:
+  save_interval: 1
+  save_interval_updates: 0
+  keep_interval_updates: 1
+  no_epoch_checkpoints: true
+
+distributed_training:
+  ddp_backend: c10d
+  find_unused_parameters: true
+  distributed_world_size: 4
+  nprocs_per_node: 4
+
+task:
+  _name: av_hubert_pretraining
+  is_s2s: true
+  data: ???
+  label_dir: ???
+  tokenizer_bpe_model: ???
+  normalize: true  # must be consistent with pre-training
+  labels: ["wrd"]
+  single_target: true
+  fine_tuning: true
+  stack_order_audio: 4
+  tokenizer_bpe_name: sentencepiece
+  max_sample_size: 500
+  modalities: ["video","audio"]
+  image_aug: true
+  pad_audio: true
+  random_crop: false
+  noise_prob: 0.25
+  noise_snr: 0
+  noise_wav: ???
+
+dataset:
+  num_workers: 6
+  max_tokens: 4000 # 160 seconds per batch (160 * 25)
+  validate_after_updates: 0
+  validate_interval: 1
+  train_subset: train
+  valid_subset: valid
+
+criterion:
+  _name: av_hubert_distill
+  l1_weight: 1.0
+  l2_weight: 0.0
+  cos_weight: 1.0
+  cos_type: raw
+  use_merge: true
+  merge_type: QKV
+  merge_step: 2500
+  beta_warmup_steps: 0
+
+optimization:
+  max_update: 50000
+  clip_norm: 10.0
+  update_freq: [1]
+  lr: [0.002]
+
+optimizer:
+  _name: adam
+  adam_betas: (0.9,0.999)
+  adam_eps: 1e-08
+  weight_decay: 0.0
+
+lr_scheduler:
+  _name: polynomial_decay
+  power: 1
+  warmup_updates: 15000
+
+model:
+  _name: av_hubert_distill
+  teacher_path: ???
+  student_path: ???
+  distill_layers: 0.4,8,12
+  distill_mode: layer2layer
+  apply_mask: false
+  mask_selection: static
+  mask_length: 10
+  mask_other: 0
+  mask_prob: 0.75
+  mask_channel_selection: static
+  mask_channel_length: 64
+  mask_channel_other: 0
+  mask_channel_prob: 0.5
+  feature_grad_mult: 1.0
+
+hydra:
+  job:
+    config:
+      override_dirname:
+        kv_sep: '-'
+        item_sep: '__'
+        exclude_keys:
+          - run
+          - task.data
+          - task.label_dir
+          - model.w2v_path
+          - dataset.train_subset
+          - dataset.valid_subset
+          - criterion.wer_kenlm_model
+          - criterion.wer_lexicon
+  run:
+    dir: ???
+  sweep:
+    dir: ???
+    subdir: ${hydra.job.config_name}__${hydra.job.override_dirname}
