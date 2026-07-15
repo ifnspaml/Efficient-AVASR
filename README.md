@@ -44,6 +44,13 @@ sbatch scripts/run_pruning_merging.sh
 ```
 For configuration see scripts/run_pruning_merging.sh. Configuration files can be found in avhubert/conf/.
 
+## Teacher Baseline (Full AV-HuBERT Fine-tuning)
+To fine-tune the full teacher model (base encoder + S2S decoder) on LRS3 433h and run inference, submit to the GPU cluster:
+```
+sbatch scripts/run_baseline.sh
+```
+For configuration see scripts/run_baseline.sh. Outputs are written to `exp/finetune/asr/teacher/`.
+
 ## Evaluate Model FLOPs
 To evaluate the FLOPs of a model run:
 ```
