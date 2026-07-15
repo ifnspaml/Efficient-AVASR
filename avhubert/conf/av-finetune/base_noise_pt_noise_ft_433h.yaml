@@ -5,6 +5,7 @@ common:
   log_format: json
   log_interval: 100
   tensorboard_logdir: tblog
+  wandb_project: dpav-hubert
   seed: 1337
   user_dir: ???
 

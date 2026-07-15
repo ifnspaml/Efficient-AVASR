@@ -428,12 +428,28 @@ class WandBProgressBarWrapper(BaseProgressBar):
             step = stats["num_updates"]
 
         prefix = "" if tag is None else tag + "/"
+        log_dict = {}
+
+        wrapped = self.wrapped_bar
+        if getattr(wrapped, "epoch", None) is not None:
+            log_dict[prefix + "epoch"] = wrapped.epoch
+        if (
+            getattr(wrapped, "i", None) is not None
+            and getattr(wrapped, "size", None)
+            and wrapped.size
+        ):
+            log_dict[prefix + "update"] = round(
+                wrapped.epoch - 1 + (wrapped.i + 1) / float(wrapped.size), 3
+            )
 
         for key in stats.keys() - {"num_updates"}:
             if isinstance(stats[key], AverageMeter):
-                wandb.log({prefix + key: stats[key].val}, step=step)
+                log_dict[prefix + key] = stats[key].val
             elif isinstance(stats[key], Number):
-                wandb.log({prefix + key: stats[key]}, step=step)
+                log_dict[prefix + key] = stats[key]
+
+        if log_dict:
+            wandb.log(log_dict, step=step)
 
 
 try:
