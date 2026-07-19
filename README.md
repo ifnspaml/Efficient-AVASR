@@ -51,6 +51,8 @@ sbatch scripts/run_baseline.sh
 ```
 For configuration see scripts/run_baseline.sh. Outputs are written to `exp/finetune/asr/teacher/`.
 
+Noisy inference uses RMS noise addition by default. For ITU-T P.56 active speech level mixing, set `INFER_NOISE_METHOD=itut` (or `p56`) when submitting; results are written under `infer_itut/` instead of `infer/`. Requires the sibling package `itut_p56_noise_addition` under `work_fast/`.
+
 ## Evaluate Model FLOPs
 To evaluate the FLOPs of a model run:
 ```

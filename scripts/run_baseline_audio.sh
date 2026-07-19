@@ -6,9 +6,11 @@
 #SBATCH --cpus-per-task=2
 #SBATCH --ntasks-per-node=1
 #SBATCH --begin=now
-#SBATCH --job-name=dpav_hubert_teacher
+#SBATCH --job-name=dpav_hubert_teacher_a
 #SBATCH --mem=48gb
 
+# Audio-only AV-HuBERT base teacher fine-tune + clean infer + parallel ITUT eval.
+# Results: exp/finetune/asr-audio/teacher/
 
 PYTHON_VIRTUAL_ENVIRONMENT=dpavhubert
 CONDA_ROOT=/home/zhengyangli/anaconda3/
@@ -21,10 +23,11 @@ set -euo pipefail
 exp_name=teacher
 project_path=/beegfs/work_fast/zhengyangli/dpav_hubert
 avhubert_dir=${project_path}/avhubert
+cd "${project_path}"
 
 # wandb
 wandb_project=dpav-hubert
-export WANDB_RUN_GROUP=${exp_name}
+export WANDB_RUN_GROUP=${exp_name}-audio
 
 teacher_ckpt=/home/zhengyangli/work/av_hubert_pre_trained_models/phd_thesis/base_vox_iter5.pt
 
@@ -40,9 +43,9 @@ noise_path=/beegfs/data/shared/lrs3/noise/musan/tsv/all
 noise_prob=0.25
 noise_snr=0
 
-# finetune asr config
-finetune_exp_path=${project_path}/exp/finetune/asr/${exp_name}
-finetune_config_path=${project_path}/avhubert/conf/av-finetune/
+# finetune audio-only ASR config
+finetune_exp_path=${project_path}/exp/finetune/asr-audio/${exp_name}
+finetune_config_path=${project_path}/avhubert/conf/a-finetune/
 finetune_config_name=base_noise_pt_noise_ft_433h.yaml
 finetune_update_freq=8
 finetune_use_noise=true
@@ -51,19 +54,17 @@ finetune_use_noise=true
 infer_config_path=${project_path}/avhubert/conf/
 infer_config_name=s2s_decode.yaml
 infer_datasets="test valid"
-infer_noise_types="babble music speech"
-infer_noise_snr="-5 0 5"
+infer_modalities="['audio']"
 infer_noise_method=${INFER_NOISE_METHOD:-itut}
-infer_root=infer
-[ "${infer_noise_method}" != "rms" ] && infer_root="infer_${infer_noise_method}"
+infer_noise_snr="-10 -5 0 5 10"
 
 finetune_noise_opts="task.noise_wav=Null task.noise_prob=0.0"
 if $finetune_use_noise; then
     finetune_noise_opts="task.noise_wav=${noise_path} task.noise_prob=${noise_prob} task.noise_snr=${noise_snr}"
 fi
 
-# finetune asr (full teacher encoder + s2s decoder)
-export WANDB_NAME=${exp_name}-finetune
+# finetune ASR (audio-only)
+export WANDB_NAME=${exp_name}-audio-finetune
 CUDA_VISIBLE_DEVICES=$free_gpu fairseq-hydra-train \
     --config-dir ${finetune_config_path} \
     --config-name ${finetune_config_name} \
@@ -80,7 +81,7 @@ CUDA_VISIBLE_DEVICES=$free_gpu fairseq-hydra-train \
     hydra.run.dir=${finetune_exp_path} \
     common.user_dir=${avhubert_dir} || exit 1;
 
-# infer clean
+# infer clean (sequential; 2 splits)
 for dataset in $infer_datasets; do
     python -B ${avhubert_dir}/infer_s2s.py \
         --config-dir ${infer_config_path} \
@@ -88,33 +89,16 @@ for dataset in $infer_datasets; do
         dataset.gen_subset=${dataset} \
         common_eval.path=${finetune_exp_path}/checkpoints/checkpoint_best.pt \
         common_eval.results_path=${finetune_exp_path}/infer/clean/${dataset} \
-        override.modalities=['audio','video'] \
+        override.modalities=${infer_modalities} \
         hydra.run.dir=${finetune_exp_path}/infer/clean/${dataset} \
         common.user_dir=${avhubert_dir} || exit 1;
 done
 
-# infer noise
-for noise in $infer_noise_types; do
-    if [ $noise != speech ]; then
-        infer_noise_path=/beegfs/data/shared/lrs3/noise/musan/tsv/${noise}
-    else
-        infer_noise_path=/beegfs/data/shared/lrs3/noise/${noise}
-    fi
-    for snr in $infer_noise_snr; do
-        for dataset in $infer_datasets; do
-            python -B ${avhubert_dir}/infer_s2s.py \
-                --config-dir ${infer_config_path} \
-                --config-name ${infer_config_name} \
-                dataset.gen_subset=${dataset} \
-                common_eval.path=${finetune_exp_path}/checkpoints/checkpoint_best.pt \
-                common_eval.results_path=${finetune_exp_path}/${infer_root}/${noise}/${snr}/${dataset} \
-                override.modalities=['audio','video'] \
-                override.noise_wav=${infer_noise_path} \
-                override.noise_prob=1 \
-                override.noise_snr=${snr} \
-                override.noise_method=${infer_noise_method} \
-                hydra.run.dir=${finetune_exp_path}/${infer_root}/${noise}/${snr}/${dataset} \
-                common.user_dir=${avhubert_dir} || exit 1;
-        done
-    done
-done
+# infer ITUT noisy in parallel: -10 -5 0 5 10 × babble/music/speech × test/valid
+echo "Submitting parallel ITUT noisy inference jobs..."
+EXP_ROOT=exp/finetune/asr-audio \
+INFER_MODALITIES="${infer_modalities}" \
+INFER_NOISE_METHOD="${infer_noise_method}" \
+bash scripts/run_infer_itut_teacher_snr_ext.sh ${exp_name} ${infer_noise_snr}
+
+echo "Done. Clean under ${finetune_exp_path}/infer/clean/; noisy jobs submitted to infer_itut/."

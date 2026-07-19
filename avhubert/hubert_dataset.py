@@ -168,7 +168,8 @@ class AVHubertDataset(FairseqDataset):
             noise_fn=None,
             noise_prob=0,
             noise_snr=0,
-            noise_num=1
+            noise_num=1,
+            noise_method="rms",
     ):
         self.label_rates = (
             [label_rates for _ in range(len(label_paths))]
@@ -190,6 +191,7 @@ class AVHubertDataset(FairseqDataset):
         self.store_labels = store_labels
         self.is_s2s = is_s2s
         self.noise_wav, self.noise_prob, self.noise_snr, self.noise_num = [ln.strip() for ln in open(noise_fn).readlines()] if noise_fn is not None else [], noise_prob, noise_snr, noise_num
+        self.noise_method = noise_method
 
         assert self.single_target == (self.label_rates[0] == -1), f"single target should be equivalent to sequence label (label_rate==-1)"
         if store_labels:
@@ -232,7 +234,7 @@ class AVHubertDataset(FairseqDataset):
             f"normalize={normalize}, max_sample_size={self.max_sample_size}, "
             f"seqs2seq data={self.is_s2s},")
         logger.info(
-            f"Noise wav: {noise_fn}->{len(self.noise_wav)} wav, Prob: {self.noise_prob}, SNR: {self.noise_snr}, Number of mixture: {self.noise_num}"
+            f"Noise wav: {noise_fn}->{len(self.noise_wav)} wav, Prob: {self.noise_prob}, SNR: {self.noise_snr}, Number of mixture: {self.noise_num}, Method: {self.noise_method}"
         )
 
     def get_label(self, index, label_idx):
@@ -316,6 +318,14 @@ class AVHubertDataset(FairseqDataset):
             return noise_wav
 
     def add_noise(self, clean_wav):
+        if self.noise_method.lower() in ("itut", "p56"):
+            from . import noise_utils
+            return noise_utils.add_noise(
+                clean_wav,
+                self.noise_wav,
+                noise_snr=self.noise_snr,
+                noise_method=self.noise_method,
+            )
         clean_wav = clean_wav.astype(np.float32)
         noise_wav = self.select_noise()
         if type(self.noise_snr) == int or type(self.noise_snr) == float:

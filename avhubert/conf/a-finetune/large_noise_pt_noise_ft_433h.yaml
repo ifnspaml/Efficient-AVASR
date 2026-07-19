@@ -36,8 +36,8 @@ task:
   stack_order_audio: 4
   tokenizer_bpe_name: sentencepiece
   max_sample_size: 500
-  modalities: ["video","audio"]
-  image_aug: true
+  modalities: ["audio"]
+  image_aug: false
   pad_audio: true
   random_crop: false
   noise_prob: 0.25

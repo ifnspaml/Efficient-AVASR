@@ -51,6 +51,7 @@ class OverrideConfig(FairseqDataclass):
     noise_wav: Optional[str] = field(default=None, metadata={'help': 'noise wav file'})
     noise_prob: float = field(default=0, metadata={'help': 'noise probability'})
     noise_snr: float = field(default=0, metadata={'help': 'noise SNR in audio'})
+    noise_method: str = field(default="rms", metadata={'help': 'noise addition method: rms, itut, or p56'})
     modalities: List[str] = field(default_factory=lambda: [""], metadata={'help': 'which modality to use'})
     data: Optional[str] = field(default=None, metadata={'help': 'path to test data directory'})
     label_dir: Optional[str] = field(default=None, metadata={'help': 'path to test label directory'})
@@ -109,7 +110,11 @@ def _main(cfg, output_file):
         logger.addHandler(logging.StreamHandler(sys.stdout))
 
     utils.import_user_module(cfg.common)
-    models, saved_cfg, task = checkpoint_utils.load_model_ensemble_and_task([cfg.common_eval.path])
+    arg_overrides = ast.literal_eval(cfg.common_eval.model_overrides)
+    models, saved_cfg, task = checkpoint_utils.load_model_ensemble_and_task(
+        [cfg.common_eval.path],
+        arg_overrides=arg_overrides if arg_overrides else None,
+    )
     models = [model.eval().cuda() for model in models]
     saved_cfg.task.modalities = cfg.override.modalities
     task = tasks.setup_task(saved_cfg.task)
@@ -133,6 +138,7 @@ def _main(cfg, output_file):
     task.cfg.noise_prob = cfg.override.noise_prob
     task.cfg.noise_snr = cfg.override.noise_snr
     task.cfg.noise_wav = cfg.override.noise_wav
+    task.cfg.noise_method = cfg.override.noise_method
     if cfg.override.data is not None:
         task.cfg.data = cfg.override.data
     if cfg.override.label_dir is not None:

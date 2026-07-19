@@ -59,6 +59,9 @@ infer_config_name=s2s_decode.yaml
 infer_datasets="test valid"
 infer_noise_types="babble music speech"
 infer_noise_snr="-5 0 5"
+infer_noise_method=${INFER_NOISE_METHOD:-rms}
+infer_root=infer
+[ "${infer_noise_method}" != "rms" ] && infer_root="infer_${infer_noise_method}"
 
 noise_opts="task.noise_wav=Null task.noise_prob=0.0"
 if $use_noise; then
@@ -167,12 +170,13 @@ for noise in $infer_noise_types; do
                 --config-name ${infer_config_name} \
                 dataset.gen_subset=${dataset} \
                 common_eval.path=${finetune_exp_path}/checkpoints/checkpoint_best.pt \
-                common_eval.results_path=${finetune_exp_path}/infer/${noise}/${snr}/${dataset} \
+                common_eval.results_path=${finetune_exp_path}/${infer_root}/${noise}/${snr}/${dataset} \
                 override.modalities=['audio','video'] \
                 override.noise_wav=${infer_noise_path} \
                 override.noise_prob=1 \
                 override.noise_snr=${snr} \
-                hydra.run.dir=${finetune_exp_path}/infer/${noise}/${snr}/${dataset} \
+                override.noise_method=${infer_noise_method} \
+                hydra.run.dir=${finetune_exp_path}/${infer_root}/${noise}/${snr}/${dataset} \
                 common.user_dir=../avhubert || exit 1;
         done
     done

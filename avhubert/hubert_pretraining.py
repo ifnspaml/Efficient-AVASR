@@ -156,6 +156,7 @@ class AVHubertPretrainingConfig(FairseqDataclass):
     noise_prob: float = field(default=0, metadata={'help': 'noise probability'})
     noise_snr: Optional[str] = field(default='0', metadata={'help': 'noise SNR in audio'})
     noise_num: int = field(default=1, metadata={'help': 'number of noise wav files to mix'})
+    noise_method: str = field(default="rms", metadata={'help': 'noise addition method: rms, itut, or p56'})
     fine_tuning: bool = field(default=False, metadata={"help": "set to true if fine-tuning AV-Hubert"})
 
 @register_task("av_hubert_pretraining", dataclass=AVHubertPretrainingConfig)
@@ -269,7 +270,8 @@ class AVHubertPretrainingTask(FairseqTask):
             noise_fn=noise_fn,
             noise_prob=self.cfg.noise_prob,
             noise_snr=noise_snr,
-            noise_num=noise_num
+            noise_num=noise_num,
+            noise_method=self.cfg.noise_method,
         )
 
     def max_positions(self) -> Tuple[int, int]:

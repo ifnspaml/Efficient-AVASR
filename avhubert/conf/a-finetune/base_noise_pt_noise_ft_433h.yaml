@@ -36,8 +36,8 @@ task:
   stack_order_audio: 4
   tokenizer_bpe_name: sentencepiece
   max_sample_size: 500
-  modalities: ["video","audio"]
-  image_aug: true
+  modalities: ["audio"]
+  image_aug: false
   pad_audio: true
   random_crop: false
   noise_prob: 0.25
@@ -92,16 +92,13 @@ model:
   activation_dropout: 0.1
   attention_dropout: 0.0
   feature_grad_mult: 1.0
-  decoder_layers: 9
+  decoder_layers: 6
   decoder_dropout: 0.1
   decoder_attention_dropout: 0.0
   decoder_activation_dropout: 0.1
   freeze_finetune_updates: 48000
   share_decoder_input_output_embed: true
   decoder_normalize_before: true
-  decoder_embed_dim: 1024
-  decoder_ffn_embed_dim: 4096
-  decoder_attention_heads: 8
 
 hydra:
   job:

@@ -1,6 +1,7 @@
 #!/bin/bash
 #SBATCH --time=8-00:00:00
 #SBATCH --partition=ifn
+#SBATCH --qos=low
 #SBATCH --gres=gpu:a100:1
 #SBATCH --exclude=gpu[04,05]
 #SBATCH --cpus-per-task=2
@@ -18,7 +19,7 @@ conda activate $PYTHON_VIRTUAL_ENVIRONMENT
 set -euo pipefail
 
 # config
-exp_name=teacher
+exp_name=teacher_large
 project_path=/beegfs/work_fast/zhengyangli/dpav_hubert
 avhubert_dir=${project_path}/avhubert
 
@@ -26,7 +27,7 @@ avhubert_dir=${project_path}/avhubert
 wandb_project=dpav-hubert
 export WANDB_RUN_GROUP=${exp_name}
 
-teacher_ckpt=/home/zhengyangli/work/av_hubert_pre_trained_models/phd_thesis/base_vox_iter5.pt
+teacher_ckpt=/home/zhengyangli/work/av_hubert_pre_trained_models/phd_thesis/large_vox_iter5.pt
 
 gpus=1
 workers=4
@@ -43,7 +44,7 @@ noise_snr=0
 # finetune asr config
 finetune_exp_path=${project_path}/exp/finetune/asr/${exp_name}
 finetune_config_path=${project_path}/avhubert/conf/av-finetune/
-finetune_config_name=base_noise_pt_noise_ft_433h.yaml
+finetune_config_name=large_noise_pt_noise_ft_433h.yaml
 finetune_update_freq=8
 finetune_use_noise=true
 
