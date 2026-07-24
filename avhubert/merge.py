@@ -23,7 +23,7 @@ def merge_from_ckpt(distilled_ckpt: Optional[str], original_ckpt: str, merge_typ
     model.merge(1.0, merge_type)
 
     # Update original checkpoint state with merged information
-    original_state = torch.load(original_ckpt, map_location=torch.device("cpu"))
+    original_state = torch.load(original_ckpt, map_location=torch.device("cpu"), weights_only=False)
     original_state["cfg"]["model"]["encoder_merge_type"] = str(merge_type)
     original_state["model"] = model.state_dict()
     for i in range (0, 12):

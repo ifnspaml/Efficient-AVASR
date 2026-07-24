@@ -21,7 +21,7 @@ def save_from_ckpt(distilled_ckpt: str, original_ckpt: str) -> Dict[str, Any]:
     model = distill_model.student
 
     # Update original checkpoint state
-    original_state = torch.load(original_ckpt, map_location=torch.device("cpu"))
+    original_state = torch.load(original_ckpt, map_location=torch.device("cpu"), weights_only=False)
     original_state["model"] = model.state_dict()
     original_state["extra_state"]["distill_linear_projs"] = distill_model.distill_linear_projs.state_dict()
 

@@ -10,7 +10,7 @@ import torch
 from fairseq.data import Dictionary, encoders
 
 def add_task_state(ckpt_path):
-    std = torch.load(ckpt_path)
+    std = torch.load(ckpt_path, weights_only=False)
     cfg = std['cfg']
     if cfg['model']['_name'] == 'av_hubert':
         dictionaries = [Dictionary.load(f"{cfg['task']['label_dir']}/dict.{label}.txt") for label in cfg['task']['labels']]
@@ -18,7 +18,7 @@ def add_task_state(ckpt_path):
         std['task_state'] = {'dictionaries': dictionaries}
         print(dictionaries, std['cfg']['task'])
     else:
-        prt = torch.load(std['cfg']['model']['w2v_path'])
+        prt = torch.load(std['cfg']['model']['w2v_path'], weights_only=False)
         std['cfg']['model']['w2v_args'] = prt['cfg']
         std['cfg']['task']['fine_tuning'] = True
         dictionaries = [Dictionary.load(f"{prt['cfg']['task']['label_dir']}/dict.{label}.txt") for label in prt['cfg']['task']['labels']]

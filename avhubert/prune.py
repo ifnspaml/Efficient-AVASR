@@ -35,7 +35,7 @@ def prune_from_ckpt(distilled_ckpt: str, original_ckpt: str) -> Dict[str, Any]:
       "resnet_layers_detailed": resnet_config,
     }
     #Update original checkpoint state with pruned information
-    original_state = torch.load(original_ckpt, map_location=torch.device("cpu"))
+    original_state = torch.load(original_ckpt, map_location=torch.device("cpu"), weights_only=False)
     original_state["model"] = model.state_dict()
     original_state["cfg"]["model"].update(pruning_cfg)
     original_state["extra_state"]["distill_linear_projs"] = distill_model.distill_linear_projs.state_dict()

@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --time=4-00:00:00
-#SBATCH --partition=gpu,gpub
-#SBATCH --gres=gpu:a100:1
+#SBATCH --partition=ifn
+#SBATCH --gres=gpu:pro6000b_96gb:1
 #SBATCH --exclude=gpu[04,05]
 #SBATCH --cpus-per-task=2
 #SBATCH --ntasks-per-node=1
@@ -9,14 +9,17 @@
 #SBATCH --job-name=dpav_hubert
 #SBATCH --mem=48gb
 
-module load cuda/11.6
 
-source activate /home/reichert/anaconda3/envs/dpavhubert
+
+PYTHON_VIRTUAL_ENVIRONMENT=dpavhubert_pro6000
+CONDA_ROOT=/home/zhengyangli/anaconda3/
+source ${CONDA_ROOT}/etc/profile.d/conda.sh
+conda activate $PYTHON_VIRTUAL_ENVIRONMENT
 
 
 # config
 exp_name=merging
-project_path=/beegfs/work/reichert/dpav_hubert_asr
+project_path=/beegfs/work_fast/zhengyangli/dpav_hubert_new
 
 exp_path=${project_path}/exp/distill/${exp_name}
 

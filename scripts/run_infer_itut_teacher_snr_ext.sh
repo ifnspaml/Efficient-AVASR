@@ -30,7 +30,7 @@ else
     infer_noise_snr=${INFER_NOISE_SNR:--10 -5 0 5 10}
 fi
 
-project_path=/beegfs/work_fast/zhengyangli/dpav_hubert
+project_path=/beegfs/work_fast/zhengyangli/dpav_hubert_new
 avhubert_dir=${project_path}/avhubert
 exp_root=${EXP_ROOT:-exp/finetune/asr}
 # Allow absolute EXP_ROOT or path relative to project_path.
@@ -49,10 +49,10 @@ infer_modalities=${INFER_MODALITIES:-"['audio','video']"}
 infer_root=infer
 [ "${infer_noise_method}" != "rms" ] && infer_root="infer_${infer_noise_method}"
 
-PYTHON_VIRTUAL_ENVIRONMENT=dpavhubert
+PYTHON_VIRTUAL_ENVIRONMENT=dpavhubert_pro6000
 CONDA_ROOT=/home/zhengyangli/anaconda3/
 
-slurm_gres=${SLURM_GRES:-gpu:1080:1}
+slurm_gres=${SLURM_GRES:-gpu:pro6000b_96gb:1}
 slurm_partition=${SLURM_PARTITION:-ifn}
 slurm_qos=${SLURM_QOS:-low}
 

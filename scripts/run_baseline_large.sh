@@ -2,7 +2,7 @@
 #SBATCH --time=8-00:00:00
 #SBATCH --partition=ifn
 #SBATCH --qos=low
-#SBATCH --gres=gpu:a100:1
+#SBATCH --gres=gpu:pro6000b_96gb:1
 #SBATCH --exclude=gpu[04,05]
 #SBATCH --cpus-per-task=2
 #SBATCH --ntasks-per-node=1
@@ -11,7 +11,7 @@
 #SBATCH --mem=48gb
 
 
-PYTHON_VIRTUAL_ENVIRONMENT=dpavhubert
+PYTHON_VIRTUAL_ENVIRONMENT=dpavhubert_pro6000
 CONDA_ROOT=/home/zhengyangli/anaconda3/
 source ${CONDA_ROOT}/etc/profile.d/conda.sh
 conda activate $PYTHON_VIRTUAL_ENVIRONMENT
@@ -20,7 +20,7 @@ set -euo pipefail
 
 # config
 exp_name=teacher_large
-project_path=/beegfs/work_fast/zhengyangli/dpav_hubert
+project_path=/beegfs/work_fast/zhengyangli/dpav_hubert_new
 avhubert_dir=${project_path}/avhubert
 
 # wandb

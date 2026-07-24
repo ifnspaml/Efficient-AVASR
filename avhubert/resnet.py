@@ -282,7 +282,7 @@ class ResEncoder(nn.Module):
         self.trunk = ResNet(BasicBlock, [2, 2, 2, 2], relu_type=relu_type, layer_detailed=layer_detailed, prune_conv_channels=prune_conv_channels)
         if weights is not None:
             logger.info(f"Load {weights} for resnet")
-            std = torch.load(weights, map_location=torch.device('cpu'))['model_state_dict']
+            std = torch.load(weights, map_location=torch.device('cpu'), weights_only=False)['model_state_dict']
             frontend_std, trunk_std = OrderedDict(), OrderedDict()
             for key, val in std.items():
                 new_key = '.'.join(key.split('.')[1:])
