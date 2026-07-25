@@ -1692,7 +1692,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         default=OUTPUT_ROOT / "selection" / "final.json",
     )
     parser.add_argument("--gpus", type=int, default=1)
-    parser.add_argument("--workers", type=int, default=4)
+    parser.add_argument("--workers", type=int, default=24)
     parser.add_argument("--max-tokens", type=int, default=4000)
     parser.add_argument("--update-freq", type=int, default=4)
     parser.add_argument("--finetune-update-freq", type=int, default=8)
