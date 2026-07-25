@@ -1,0 +1,5 @@
+# @package _global_
+
+defaults:
+  - base_continuous_75k
+  - _matrix/b2_c1_t2_random_sequence

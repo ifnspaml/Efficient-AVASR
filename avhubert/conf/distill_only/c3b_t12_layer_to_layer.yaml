@@ -1,0 +1,5 @@
+# @package _global_
+
+defaults:
+  - base_continuous_75k
+  - _matrix/c3b_t12_layer_to_layer

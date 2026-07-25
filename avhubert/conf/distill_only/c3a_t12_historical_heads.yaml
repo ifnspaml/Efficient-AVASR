@@ -1,0 +1,5 @@
+# @package _global_
+
+defaults:
+  - base_continuous_75k
+  - _matrix/c3a_t12_historical_heads

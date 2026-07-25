@@ -1,0 +1,14 @@
+# @package _global_
+
+# B1: initialization control. The implementation validates that the teacher
+# sequence layers are shape-compatible with this T2/D768 student.
+model:
+  student_arch: transformer
+  student_depth: 2
+  student_embed_dim: 768
+  student_ffn_dim: 3072
+  student_attention_heads: 12
+  distill_head_mode: historical_pred_heads
+  teacher_target_layers: "0,4,8,12"
+  student_match_layers: ""
+  initialization_policy: teacher_sequence_teacher_frontend

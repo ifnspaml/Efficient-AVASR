@@ -1,0 +1,5 @@
+# @package _global_
+
+# Provisional alias only. The launcher materializes the final validation-selected
+# main run and records/reuses the exact resolved-config digest.
+{}

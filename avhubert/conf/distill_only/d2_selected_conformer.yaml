@@ -1,0 +1,5 @@
+# @package _global_
+
+defaults:
+  - base_continuous_75k
+  - _matrix/d2_selected_conformer

@@ -1,0 +1,7 @@
+# @package _global_
+
+defaults:
+  - base_continuous_75k
+  - _matrix/d1_selected_transformer
+  - _matrix/e1_selected_clean
+  - _matrix/s1_selected_main

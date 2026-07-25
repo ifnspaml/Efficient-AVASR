@@ -1,0 +1,6 @@
+# @package _global_
+
+defaults:
+  - base_continuous_75k
+  - _matrix/d1_selected_transformer
+  - _matrix/e2_selected_noisy

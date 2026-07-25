@@ -1,0 +1,13 @@
+# @package _global_
+
+# C2: thin/deep Transformer depth-width control.
+model:
+  student_arch: transformer
+  student_depth: 6
+  student_embed_dim: 384
+  student_ffn_dim: 3200
+  student_attention_heads: 12
+  distill_head_mode: historical_pred_heads
+  teacher_target_layers: "0,4,8,12"
+  student_match_layers: ""
+  initialization_policy: random_sequence_teacher_frontend

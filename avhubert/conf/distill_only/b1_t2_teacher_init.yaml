@@ -1,0 +1,5 @@
+# @package _global_
+
+defaults:
+  - base_continuous_75k
+  - _matrix/b1_t2_teacher_init

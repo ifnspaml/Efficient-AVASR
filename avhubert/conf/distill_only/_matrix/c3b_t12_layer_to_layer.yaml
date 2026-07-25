@@ -1,0 +1,13 @@
+# @package _global_
+
+# C3b differs from C3a only in representation mapping.
+model:
+  student_arch: transformer
+  student_depth: 12
+  student_embed_dim: 384
+  student_ffn_dim: 1024
+  student_attention_heads: 12
+  distill_head_mode: layer_to_layer
+  teacher_target_layers: "0,4,8,12"
+  student_match_layers: "0,4,8,12"
+  initialization_policy: random_sequence_teacher_frontend
