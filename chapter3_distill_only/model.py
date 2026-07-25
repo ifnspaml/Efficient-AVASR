@@ -4,7 +4,7 @@ import copy
 import logging
 from argparse import Namespace
 from dataclasses import dataclass, field
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Mapping, Optional, Tuple
 
 import torch
 from fairseq import checkpoint_utils, tasks
@@ -268,7 +268,82 @@ class AVHubertDistillOnly(BaseFairseqModel):
                 f"{tuple(teacher_hiddens.shape)}"
             )
 
+    @staticmethod
+    def _validate_source_padding(
+        source: Mapping[str, torch.Tensor],
+        padding_mask: Optional[torch.Tensor],
+    ) -> Tuple[int, int]:
+        if not isinstance(source, Mapping):
+            raise TypeError("source must be a mapping containing audio/video")
+        modality_shapes = []
+        for name, time_axis, expected_rank in (
+            ("audio", 2, 3),
+            ("video", 2, 5),
+        ):
+            value = source.get(name)
+            if value is None:
+                continue
+            if not torch.is_tensor(value) or value.ndim != expected_rank:
+                raise ValueError(
+                    f"source[{name!r}] must have rank {expected_rank}, "
+                    f"received {type(value).__name__} "
+                    f"{getattr(value, 'shape', None)}"
+                )
+            modality_shapes.append((name, value.size(0), value.size(time_axis)))
+        if not modality_shapes:
+            raise ValueError("source must contain at least one tensor modality")
+        batch, frames = modality_shapes[0][1:]
+        for name, current_batch, current_frames in modality_shapes[1:]:
+            if (current_batch, current_frames) != (batch, frames):
+                raise ValueError(
+                    "Audio/video batch and time dimensions must match; "
+                    f"expected {(batch, frames)}, got "
+                    f"{(current_batch, current_frames)} for {name}"
+                )
+        if padding_mask is not None:
+            if not torch.is_tensor(padding_mask):
+                raise TypeError("padding_mask must be a tensor or None")
+            if padding_mask.dtype != torch.bool:
+                raise ValueError(
+                    f"padding_mask must be bool, got {padding_mask.dtype}"
+                )
+            if tuple(padding_mask.shape) != (batch, frames):
+                raise ValueError(
+                    "Input padding_mask must have shape B x T matching source; "
+                    f"expected {(batch, frames)}, got "
+                    f"{tuple(padding_mask.shape)}"
+                )
+        return batch, frames
+
+    @staticmethod
+    def _validate_output_padding(
+        name: str,
+        output_padding_mask: Optional[torch.Tensor],
+        hiddens: torch.Tensor,
+        input_padding_mask: Optional[torch.Tensor],
+    ) -> None:
+        expected = (hiddens.size(0), hiddens.size(2))
+        if input_padding_mask is None:
+            if output_padding_mask is not None:
+                raise ValueError(
+                    f"{name} produced a padding mask without an input mask"
+                )
+            return
+        if output_padding_mask is None:
+            raise ValueError(f"{name} dropped the input padding mask")
+        if output_padding_mask.dtype != torch.bool:
+            raise ValueError(
+                f"{name} output padding mask must be bool, "
+                f"got {output_padding_mask.dtype}"
+            )
+        if tuple(output_padding_mask.shape) != expected:
+            raise ValueError(
+                f"{name} output padding mask must match representation B x T "
+                f"{expected}, got {tuple(output_padding_mask.shape)}"
+            )
+
     def forward(self, source, padding_mask=None, **unused):
+        self._validate_source_padding(source, padding_mask)
         self.teacher.eval()
         with torch.no_grad():
             teacher_all = self.teacher.extract_intermediate_features(
@@ -286,9 +361,16 @@ class AVHubertDistillOnly(BaseFairseqModel):
                 [teacher_all[layer] for layer in self.teacher_target_layers],
                 dim=1,
             )
+            teacher_padding_mask = (
+                self.teacher.forward_padding_mask(
+                    teacher_all[0], padding_mask
+                )
+                if padding_mask is not None
+                else None
+            )
 
         if self.distill_head_mode == "historical_pred_heads":
-            student_final, feature_penalty, _ = (
+            student_final, feature_penalty, student_padding_mask = (
                 self.student.extract_distillation_features(
                     source=source,
                     padding_mask=padding_mask,
@@ -297,7 +379,7 @@ class AVHubertDistillOnly(BaseFairseqModel):
             )
             student_hiddens = self.distillation_head(student_final)
         elif self.distill_head_mode == "layer_to_layer":
-            student_all, feature_penalty, _ = (
+            student_all, feature_penalty, student_padding_mask = (
                 self.student.extract_distillation_features(
                     source=source,
                     padding_mask=padding_mask,
@@ -324,11 +406,36 @@ class AVHubertDistillOnly(BaseFairseqModel):
             )
 
         self._validate_hidden_shapes(teacher_hiddens, student_hiddens)
+        self._validate_output_padding(
+            "teacher",
+            teacher_padding_mask,
+            teacher_hiddens,
+            padding_mask,
+        )
+        self._validate_output_padding(
+            "student",
+            student_padding_mask,
+            student_hiddens,
+            padding_mask,
+        )
+        if teacher_padding_mask is None:
+            if student_padding_mask is not None:
+                raise ValueError(
+                    "Teacher/student output padding masks are incompatible"
+                )
+        elif not torch.equal(teacher_padding_mask, student_padding_mask):
+            raise ValueError(
+                "Teacher/student output padding masks differ after feature "
+                "alignment"
+            )
         return {
             "teacher_hiddens": teacher_hiddens,
             "student_hiddens": student_hiddens,
             "student_features_pen": feature_penalty,
             "teacher_target_layers": self.teacher_target_layers,
+            "padding_mask": student_padding_mask,
+            "teacher_padding_mask": teacher_padding_mask,
+            "student_padding_mask": student_padding_mask,
         }
 
     def set_num_updates(self, num_updates):

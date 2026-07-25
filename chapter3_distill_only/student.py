@@ -229,9 +229,11 @@ class Chapter3AVHubertModel(AVHubertModel):
                 f"Unsupported modality_fuse setting {self.modality_fuse!r}"
             )
 
-        # This is the historical pre-projection feature penalty.
-        feature_penalty = features.float().pow(2).mean()
         features = self.layer_norm(features.transpose(1, 2))
+        # Historical Distil-AVHuBERT returns ``feat`` after the fused-feature
+        # LayerNorm and computes ``feat.float().pow(2).mean()`` in
+        # pretrain_expert.py.  Keep this before the optional projection.
+        feature_penalty = features.float().pow(2).mean()
         if padding_mask is not None:
             padding_mask = self.forward_padding_mask(features, padding_mask)
         if self.post_extract_proj is not None:

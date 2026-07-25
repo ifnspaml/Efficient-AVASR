@@ -111,7 +111,9 @@ must never be interpreted as student block 0 in historical-head mode.
 - Its cosine term is
   `-logsigmoid(cosine_similarity(prediction, target, dim=-1))`, globally
   averaged.
-- Its optional feature penalty is the mean squared feature magnitude.
+- Its optional feature penalty is the mean squared magnitude of the fused
+  representation after the historical frontend `LayerNorm` and before the
+  optional sequence-dimension projection.
 - The historical total is reconstruction + configured feature penalty +
   configured cosine coefficient. The Chapter 3 defaults are L1 `1.0`, L2
   `0.0`, negative-log-sigmoid cosine `1.0`, and feature penalty `0.0`.

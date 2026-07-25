@@ -25,6 +25,24 @@ construction smoke accepts `--verify-export` and reloads the teacher/head-free
 student both directly through Fairseq and through the unchanged
 `HubertEncoder` path.
 
+Run the heavier trainer-level checkpoint gate explicitly on CPU or GPU:
+
+```bash
+env PYTHONPATH=fairseq:. PYTHONPYCACHEPREFIX=/tmp/ch3-pyc \
+  /home/zhengyangli/work_fast/envs/dpavhubert_pro6000/bin/python \
+  tests/distill_only/smoke_trainer_checkpoint_resume.py \
+  --config-name b2_c1_t2_random_sequence --device cuda
+```
+
+This uses Fairseq's real `Trainer`, `checkpoint_utils`, LRS3 train iterator,
+and frozen teacher checkpoint. It checks exact in-stage restoration of model,
+Adam, scheduler/LR/update, iterator offset, and meters, then checks that S2's
+`finetune_from_model` retains student/head weights while resetting optimizer,
+scheduler, update count, iterator, and meters. It is opt-in because it builds
+the teacher/student three times and writes a complete temporary checkpoint.
+Pass an empty `--work-dir` to retain the diagnostic checkpoint and output
+directory.
+
 ## B/C runs
 
 Inspect a complete command without creating output:
@@ -60,6 +78,12 @@ selected Transformer and a grid of Conformer FFN multiples of 128 with
 
 ```bash
 scripts/distill_only/profile_config.py \
+  --config-name d1_selected_transformer \
+  --source-manifest PATH_TO_AGREED_C_MANIFEST \
+  --destination-arch transformer \
+  --output exp/chapter3_distill_only/selection/d1_profile.json
+
+scripts/distill_only/profile_config.py \
   --config-name d2_selected_conformer \
   --source-manifest PATH_TO_AGREED_C_MANIFEST \
   --destination-arch conformer \
@@ -88,8 +112,11 @@ scripts/distill_only/freeze_selection.py \
 ```
 
 The selection lock snapshots clean and babble-0-dB validation values and
-artifact hashes. D2 refuses to launch if the match artifact or any input
-profile changes, and the matched FFN override cannot be superseded manually.
+artifact hashes. Each profile is bound to the selected C manifest's immutable
+digest. The matcher rejects a CLI FFN that differs from the profiled config
+and rejects changes other than Transformer-to-Conformer block type and the
+candidate FFN. D2 refuses to launch if the match artifact or any input profile
+changes, and the matched FFN override cannot be superseded manually.
 
 ```bash
 scripts/distill_only/launch.sh \

@@ -20,7 +20,10 @@ from chapter3_distill_only.manifest import (  # noqa: E402
     sha256_file,
     utc_now,
 )
-from chapter3_distill_only.profiling import select_conformer_ffn_match  # noqa: E402
+from chapter3_distill_only.profiling import (  # noqa: E402
+    select_conformer_ffn_match,
+    validate_config_profile,
+)
 
 
 def _candidate(value: str) -> Dict[str, Any]:
@@ -30,7 +33,17 @@ def _candidate(value: str) -> Dict[str, Any]:
     except ValueError as exc:
         raise argparse.ArgumentTypeError("candidate must have form FFN_DIM=profile.json") from exc
     profile = read_json(Path(raw_path))
-    profile["student_ffn_dim"] = ffn_dim
+    try:
+        validated = validate_config_profile(
+            profile, expected_arch="conformer"
+        )
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from exc
+    if validated["student_ffn_dim"] != ffn_dim:
+        raise argparse.ArgumentTypeError(
+            f"CLI FFN {ffn_dim} does not match profile FFN "
+            f"{validated['student_ffn_dim']} in {raw_path}"
+        )
     profile["profile_path"] = str(Path(raw_path).resolve())
     profile["profile_sha256"] = sha256_file(Path(raw_path))
     return profile
@@ -48,6 +61,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     args = parse_args(argv)
     try:
         target = read_json(args.target)
+        validate_config_profile(target, expected_arch="transformer")
         result = select_conformer_ffn_match(target, args.candidate)
         result.update(
             {

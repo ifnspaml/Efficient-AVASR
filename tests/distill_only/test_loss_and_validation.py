@@ -12,6 +12,7 @@ from torch import nn
 from chapter3_distill_only.criterion import AVHubertDistillOnlyCriterion
 from chapter3_distill_only.model import AVHubertDistillOnly
 from chapter3_distill_only.student import (
+    Chapter3AVHubertModel,
     parse_layer_ids,
     validate_architecture,
     validate_target_mapping,
@@ -37,6 +38,11 @@ class _Teacher(nn.Module):
         value = torch.ones(1, 3, 4)
         return [value + index for index in range(13)]
 
+    def forward_padding_mask(self, features, padding_mask):
+        if tuple(padding_mask.shape) != tuple(features.shape[:2]):
+            raise AssertionError("test padding mask is not aligned")
+        return padding_mask
+
 
 class _Student(nn.Module):
     def __init__(self, depth: int):
@@ -57,9 +63,89 @@ class _Student(nn.Module):
         return representations, value.pow(2).mean(), padding_mask
 
 
+class _MismatchedPaddingStudent(_Student):
+    def extract_distillation_features(
+        self, source, padding_mask, *, return_intermediates
+    ):
+        representations, feature_penalty, output_mask = super().extract_distillation_features(
+            source,
+            padding_mask,
+            return_intermediates=return_intermediates,
+        )
+        return representations, feature_penalty, ~output_mask
+
+
 class _HistoricalHead(nn.Module):
     def forward(self, value):
         return value.unsqueeze(1).repeat(1, 4, 1, 1)
+
+
+class _ProbeEncoder(nn.Module):
+    def get_intermediate_outputs(self, value, padding_mask=None):
+        return [value, value + 1.0]
+
+    def forward(self, value, padding_mask=None, layer=None):
+        return value + 1.0, []
+
+
+class _FeatureProbe(nn.Module):
+    extract_distillation_features = (
+        Chapter3AVHubertModel.extract_distillation_features
+    )
+
+    def __init__(self):
+        super().__init__()
+        self.modality_dropout = 0.0
+        self.audio_dropout = 0.0
+        self.modality_fuse = "concat"
+        self.layer_norm = nn.LayerNorm(4)
+        self.post_extract_proj = nn.Linear(4, 3, bias=False)
+        with torch.no_grad():
+            self.post_extract_proj.weight.copy_(
+                torch.tensor(
+                    [
+                        [1.0, 0.0, 0.0, 0.0],
+                        [0.0, 1.0, 0.0, 0.0],
+                        [0.0, 0.0, 1.0, 0.0],
+                    ]
+                )
+            )
+        self.dropout_input = nn.Identity()
+        self.encoder = _ProbeEncoder()
+
+    def forward_features(self, source, modality):
+        return source
+
+    def forward_padding_mask(self, features, padding_mask):
+        return padding_mask
+
+
+def _source(frames: int = 3):
+    return {
+        "audio": torch.ones(1, 104, frames),
+        "video": torch.ones(1, 1, frames, 2, 2),
+    }
+
+
+def _wrapper(student):
+    checkpoint_cfg = SimpleNamespace(
+        model=SimpleNamespace(), task=SimpleNamespace()
+    )
+    return AVHubertDistillOnly(
+        teacher=_Teacher(),
+        student=student,
+        distillation_head=_HistoricalHead(),
+        teacher_target_layers=(0, 4, 8, 12),
+        student_match_layers=(),
+        cfg=SimpleNamespace(
+            distill_head_mode="historical_pred_heads",
+            student_depth=student.depth,
+            initialization_policy="unit_test",
+        ),
+        student_checkpoint_cfg=checkpoint_cfg,
+        student_task_state={},
+        initialization_report={},
+    )
 
 
 class HistoricalLossTest(unittest.TestCase):
@@ -90,6 +176,38 @@ class HistoricalLossTest(unittest.TestCase):
         # Mean historical losses use one Fairseq gradient denominator.
         self.assertEqual(sample_size, 1)
         self.assertEqual(logging["nsentences"], 2)
+
+
+class HistoricalFeatureTest(unittest.TestCase):
+    def test_penalty_uses_layer_normalized_fused_feature(self) -> None:
+        probe = _FeatureProbe().eval()
+        audio = torch.tensor([[[1.0, 2.0], [3.0, 6.0]]])
+        video = torch.tensor([[[5.0, 4.0], [9.0, 8.0]]])
+        source = {"audio": audio, "video": video}
+
+        representations, feature_penalty, output_mask = (
+            probe.extract_distillation_features(
+                source,
+                padding_mask=None,
+                return_intermediates=True,
+            )
+        )
+        fused = torch.cat([audio, video], dim=1).transpose(1, 2)
+        normalized = probe.layer_norm(fused)
+        projected = probe.post_extract_proj(normalized)
+
+        torch.testing.assert_close(
+            feature_penalty, normalized.float().pow(2).mean()
+        )
+        self.assertFalse(
+            torch.isclose(feature_penalty, fused.float().pow(2).mean())
+        )
+        self.assertIsNone(output_mask)
+
+        # Target identifier 0 is the input passed to the sequence encoder,
+        # after fused LayerNorm and the optional representation projection.
+        torch.testing.assert_close(representations[0], projected)
+        torch.testing.assert_close(representations[1], projected + 1.0)
 
 
 class MappingValidationTest(unittest.TestCase):
@@ -124,11 +242,37 @@ class MappingValidationTest(unittest.TestCase):
                     student_task_state={},
                     initialization_report={},
                 )
-                result = model(source={}, padding_mask=None)
+                result = model(source=_source(), padding_mask=None)
                 self.assertFalse(student.return_intermediates)
                 self.assertEqual(
                     tuple(result["student_hiddens"].shape), (1, 4, 3, 4)
                 )
+
+    def test_padded_wrapper_preserves_compatible_output_masks(self) -> None:
+        padding_mask = torch.tensor([[False, False, True]])
+        result = _wrapper(_Student(depth=2))(
+            source=_source(), padding_mask=padding_mask
+        )
+        torch.testing.assert_close(result["padding_mask"], padding_mask)
+        torch.testing.assert_close(
+            result["teacher_padding_mask"], padding_mask
+        )
+        torch.testing.assert_close(
+            result["student_padding_mask"], padding_mask
+        )
+
+    def test_padded_wrapper_rejects_bad_or_incompatible_masks(self) -> None:
+        wrapper = _wrapper(_Student(depth=2))
+        with self.assertRaises(ValueError):
+            wrapper(
+                source=_source(),
+                padding_mask=torch.zeros(1, 2, dtype=torch.bool),
+            )
+        with self.assertRaises(ValueError):
+            _wrapper(_MismatchedPaddingStudent(depth=2))(
+                source=_source(),
+                padding_mask=torch.tensor([[False, False, True]]),
+            )
 
     def test_layer_mode_checks_student_bounds(self) -> None:
         with self.assertRaises(ValueError):

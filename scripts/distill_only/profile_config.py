@@ -18,8 +18,15 @@ CONFIG_ROOT = REPO_ROOT / "avhubert" / "conf" / "distill_only"
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from chapter3_distill_only.manifest import atomic_write_json, utc_now  # noqa: E402
-from chapter3_distill_only.profiling import profile_distillation_model  # noqa: E402
+from chapter3_distill_only.manifest import (  # noqa: E402
+    ManifestStore,
+    atomic_write_json,
+    utc_now,
+)
+from chapter3_distill_only.profiling import (  # noqa: E402
+    profile_architecture_fields,
+    profile_distillation_model,
+)
 from chapter3_distill_only.selection import (  # noqa: E402
     inherited_hydra_overrides,
     read_selection,
@@ -54,14 +61,17 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if args.from_selection and args.source_manifest:
         raise SystemExit("--from-selection and --source-manifest are mutually exclusive")
     selection_overrides = []
+    source_manifest_path = None
     if args.from_selection:
         selection = read_selection(args.from_selection)
+        source_manifest_path = Path(selection["selected_manifest"]).resolve()
         selection_overrides = inherited_hydra_overrides(
             selection,
             destination_arch=args.destination_arch,
             destination_experiment=args.config_name,
         )
     elif args.source_manifest:
+        source_manifest_path = ManifestStore(args.source_manifest).path.resolve()
         selection_overrides = inherited_hydra_overrides(
             {
                 "selected_manifest": str(args.source_manifest.resolve()),
@@ -89,6 +99,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         model = task.build_model(cfg.model)
         model.cpu()
         result = profile_distillation_model(model)
+        source_identity = None
+        if source_manifest_path is not None:
+            source_manifest = ManifestStore(source_manifest_path).read()
+            source_identity = {
+                "path": str(source_manifest_path),
+                "immutable_sha256": source_manifest["immutable_sha256"],
+                "config_digest": source_manifest["immutable"].get(
+                    "config_digest"
+                ),
+            }
         result.update(
             {
                 "schema_version": "chapter3-config-profile/v1",
@@ -102,12 +122,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                     if args.from_selection
                     else None
                 ),
-                "source_manifest": (
-                    str(args.source_manifest.resolve())
-                    if args.source_manifest
-                    else None
-                ),
+                "source_manifest": source_identity,
                 "overrides": overrides,
+                **profile_architecture_fields(cfg.model),
             }
         )
         atomic_write_json(args.output, result)

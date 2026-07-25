@@ -7,7 +7,153 @@ import subprocess
 import threading
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Dict, Iterable, Mapping, Optional
+
+
+CONFIG_PROFILE_SCHEMA = "chapter3-config-profile/v1"
+_PRESERVED_PROFILE_MODEL_FIELDS = (
+    "student_depth",
+    "student_embed_dim",
+    "student_attention_heads",
+    "student_dropout",
+    "student_attention_dropout",
+    "student_activation_dropout",
+    "student_layerdrop",
+    "student_layer_norm_first",
+    "student_dropout_input",
+    "student_conv_pos",
+    "student_conv_pos_groups",
+    "student_conformer_kernel",
+    "student_conformer_attention_type",
+    "student_conformer_position_type",
+    "distill_head_mode",
+    "prediction_head_hidden_dim",
+    "teacher_target_layers",
+    "student_match_layers",
+    "initialization_policy",
+    "modality_dropout",
+    "audio_dropout",
+    "feature_grad_mult",
+    "distill_loss_type",
+    "l1_weight",
+    "l2_weight",
+    "cosine_weight",
+    "cosine_type",
+    "feature_penalty_weight",
+)
+
+
+def profile_architecture_fields(model_config: Any) -> Dict[str, Any]:
+    """Return the exact top-level architecture identity stored by profile_config."""
+
+    def value(name: str) -> Any:
+        if isinstance(model_config, Mapping):
+            return model_config[name]
+        return getattr(model_config, name)
+
+    return {
+        "student_arch": str(value("student_arch")),
+        "student_depth": int(value("student_depth")),
+        "student_embed_dim": int(value("student_embed_dim")),
+        "student_ffn_dim": int(value("student_ffn_dim")),
+        "student_attention_heads": int(value("student_attention_heads")),
+    }
+
+
+def validate_config_profile(
+    profile: Mapping[str, Any],
+    *,
+    expected_arch: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Validate the provenance and resolved architecture in a profile artifact."""
+
+    if profile.get("schema_version") != CONFIG_PROFILE_SCHEMA:
+        raise ValueError(
+            f"profile must use schema {CONFIG_PROFILE_SCHEMA}"
+        )
+    source = profile.get("source_manifest")
+    if not isinstance(source, Mapping):
+        raise ValueError("profile must contain a source_manifest identity")
+    source_path = Path(str(source.get("path", ""))).resolve()
+    source_digest = str(source.get("immutable_sha256", ""))
+    if not source_path.name == "manifest.v1.json" or not source_digest:
+        raise ValueError("profile source_manifest identity is incomplete")
+    resolved = profile.get("resolved_config")
+    if not isinstance(resolved, Mapping):
+        raise ValueError("profile must retain its resolved_config")
+    model = resolved.get("model")
+    if not isinstance(model, Mapping):
+        raise ValueError("profile resolved_config has no model section")
+    architecture = str(model.get("student_arch", ""))
+    if expected_arch is not None and architecture != expected_arch:
+        raise ValueError(
+            f"expected {expected_arch} profile, found {architecture or 'missing'}"
+        )
+    normalized: Dict[str, Any] = {
+        "source_manifest": {
+            "path": str(source_path),
+            "immutable_sha256": source_digest,
+            "config_digest": source.get("config_digest"),
+        },
+        "resolved_config": resolved,
+        "student_arch": architecture,
+    }
+    for field in (
+        "student_depth",
+        "student_embed_dim",
+        "student_ffn_dim",
+        "student_attention_heads",
+    ):
+        try:
+            top_level = int(profile[field])
+            configured = int(model[field])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError(f"profile has invalid {field}") from exc
+        if top_level != configured:
+            raise ValueError(
+                f"profile {field}={top_level} does not match resolved config "
+                f"value {configured}"
+            )
+        normalized[field] = top_level
+    for field in ("deployed_backbone_parameters", "flops"):
+        try:
+            numeric = int(profile[field])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError(f"profile has invalid {field}") from exc
+        if numeric <= 0:
+            raise ValueError(f"profile {field} must be positive")
+        normalized[field] = numeric
+    return normalized
+
+
+def _assert_profiles_form_control(
+    target: Mapping[str, Any], candidate: Mapping[str, Any]
+) -> None:
+    target_validated = validate_config_profile(
+        target, expected_arch="transformer"
+    )
+    candidate_validated = validate_config_profile(
+        candidate, expected_arch="conformer"
+    )
+    if (
+        target_validated["source_manifest"]
+        != candidate_validated["source_manifest"]
+    ):
+        raise ValueError(
+            "target and Conformer profiles must share one source manifest identity"
+        )
+    target_model = target_validated["resolved_config"]["model"]
+    candidate_model = candidate_validated["resolved_config"]["model"]
+    differences = []
+    for field in _PRESERVED_PROFILE_MODEL_FIELDS:
+        if target_model.get(field) != candidate_model.get(field):
+            differences.append(field)
+    if differences:
+        raise ValueError(
+            "Conformer profile changes selected model fields other than "
+            "student_arch/student_ffn_dim: " + ", ".join(differences)
+        )
 
 
 def _parameters(module: Any) -> Iterable[Any]:
@@ -136,17 +282,22 @@ def select_conformer_ffn_match(
 ) -> Dict[str, Any]:
     """Select the requested parameter/FLOP match with a deterministic tie-break."""
 
-    target_parameters = int(target["deployed_backbone_parameters"])
-    target_flops = int(target["flops"])
-    if target_parameters <= 0 or target_flops <= 0:
-        raise ValueError("target parameters and FLOPs must be positive")
+    target_validated = validate_config_profile(
+        target, expected_arch="transformer"
+    )
+    target_parameters = target_validated["deployed_backbone_parameters"]
+    target_flops = target_validated["flops"]
     scored = []
     for candidate in candidates:
-        ffn_dim = int(candidate["student_ffn_dim"])
+        _assert_profiles_form_control(target, candidate)
+        candidate_validated = validate_config_profile(
+            candidate, expected_arch="conformer"
+        )
+        ffn_dim = candidate_validated["student_ffn_dim"]
         if ffn_dim <= 0 or ffn_dim % 128:
             raise ValueError(f"Conformer FFN dimension must be a positive multiple of 128: {ffn_dim}")
-        parameters = int(candidate["deployed_backbone_parameters"])
-        flops = int(candidate["flops"])
+        parameters = candidate_validated["deployed_backbone_parameters"]
+        flops = candidate_validated["flops"]
         parameter_mismatch = abs(parameters - target_parameters) / target_parameters
         flop_mismatch = abs(flops - target_flops) / target_flops
         scored.append(
@@ -173,6 +324,7 @@ def select_conformer_ffn_match(
             "tie-break by relative parameter mismatch then FFN dimension"
         ),
         "target": dict(target),
+        "source_manifest": target_validated["source_manifest"],
         "candidates": scored,
         "selected": scored[0],
         "hydra_override": f"model.student_ffn_dim={scored[0]['student_ffn_dim']}",

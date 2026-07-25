@@ -18,6 +18,7 @@ from .manifest import (
     sha256_json,
     utc_now,
 )
+from .profiling import validate_config_profile
 
 
 SELECTION_SCHEMA = "chapter3-distill-selection/v1"
@@ -243,6 +244,8 @@ def _load_conformer_match(path: os.PathLike[str] | str) -> Dict[str, Any]:
         (
             match.get("target_profile_path"),
             match.get("target_profile_sha256"),
+            "transformer",
+            match.get("target"),
         )
     ]
     candidates = match.get("candidates")
@@ -252,21 +255,205 @@ def _load_conformer_match(path: os.PathLike[str] | str) -> Dict[str, Any]:
         if not isinstance(candidate, Mapping):
             raise SelectionError("invalid Conformer match candidate")
         profile_entries.append(
-            (candidate.get("profile_path"), candidate.get("profile_sha256"))
+            (
+                candidate.get("profile_path"),
+                candidate.get("profile_sha256"),
+                "conformer",
+                candidate,
+            )
         )
-    for raw_path, recorded_hash in profile_entries:
+    loaded_profiles = []
+    for raw_path, recorded_hash, expected_arch, embedded in profile_entries:
         profile_path = Path(str(raw_path or "")).resolve()
         if not profile_path.is_file() or sha256_file(profile_path) != recorded_hash:
             raise SelectionError(
                 f"Conformer input profile missing or changed: {profile_path}"
             )
+        profile = read_json(profile_path)
+        try:
+            validated = validate_config_profile(
+                profile, expected_arch=expected_arch
+            )
+        except ValueError as exc:
+            raise SelectionError(
+                f"invalid {expected_arch} profile {profile_path}: {exc}"
+            ) from exc
+        if not isinstance(embedded, Mapping):
+            raise SelectionError(
+                f"Conformer match does not embed {profile_path}"
+            )
+        for field in (
+            "student_arch",
+            "student_depth",
+            "student_embed_dim",
+            "student_ffn_dim",
+            "student_attention_heads",
+            "deployed_backbone_parameters",
+            "flops",
+            "source_manifest",
+            "resolved_config",
+        ):
+            if embedded.get(field) != profile.get(field):
+                raise SelectionError(
+                    f"Conformer match embedded {field} differs from "
+                    f"profile {profile_path}"
+                )
+        loaded_profiles.append(
+            {
+                "path": str(profile_path),
+                "sha256": recorded_hash,
+                "profile": profile,
+                "validated": validated,
+            }
+        )
+    if match.get("source_manifest") != loaded_profiles[0]["validated"][
+        "source_manifest"
+    ]:
+        raise SelectionError(
+            "Conformer match source identity differs from its target profile"
+        )
+    selected_profile_path = str(
+        Path(str(selected.get("profile_path", ""))).resolve()
+    )
+    selected_profile = next(
+        (
+            entry
+            for entry in loaded_profiles[1:]
+            if entry["path"] == selected_profile_path
+        ),
+        None,
+    )
+    if selected_profile is None:
+        raise SelectionError(
+            "selected Conformer candidate is not one of the sealed profiles"
+        )
+    if selected_profile["validated"]["student_ffn_dim"] != ffn_dim:
+        raise SelectionError(
+            "selected Conformer FFN differs from its actual profile"
+        )
     return {
         "path": str(match_path),
         "sha256": sha256_file(match_path),
         "selected_student_ffn_dim": ffn_dim,
         "hydra_override": match["hydra_override"],
         "record": match,
+        "_profiles": loaded_profiles,
     }
+
+
+def _assert_config_value(
+    *,
+    selected: Mapping[str, Any],
+    profiled: Mapping[str, Any],
+    section: str,
+    field: str,
+    profile_path: str,
+) -> None:
+    selected_section = selected.get(section)
+    if not isinstance(selected_section, Mapping) or field not in selected_section:
+        return
+    profiled_section = profiled.get(section)
+    if (
+        not isinstance(profiled_section, Mapping)
+        or profiled_section.get(field) != selected_section[field]
+    ):
+        raise SelectionError(
+            f"profile {profile_path} does not preserve selected "
+            f"{section}.{field}"
+        )
+
+
+def _verify_conformer_match_binding(
+    match: Mapping[str, Any],
+    *,
+    selected_path: Path,
+    selected_manifest: Mapping[str, Any],
+) -> None:
+    """Prove every matching profile was derived from the selected C run."""
+
+    expected_source = {
+        "path": str(selected_path.resolve()),
+        "immutable_sha256": selected_manifest["immutable_sha256"],
+        "config_digest": selected_manifest["immutable"].get("config_digest"),
+    }
+    if match.get("record", {}).get("source_manifest") != expected_source:
+        raise SelectionError(
+            "Conformer matching artifact is not bound to the selected C manifest"
+        )
+    selected_config = _resolved_config(selected_manifest)
+    selected_model = selected_config.get("model")
+    if not isinstance(selected_model, Mapping):
+        raise SelectionError(
+            "selected C manifest has no immutable resolved model config"
+        )
+    profiles = match.get("_profiles")
+    if not isinstance(profiles, list) or len(profiles) < 2:
+        raise SelectionError("Conformer matching evidence has no candidate profiles")
+    for index, entry in enumerate(profiles):
+        validated = entry["validated"]
+        profile = entry["profile"]
+        profile_path = entry["path"]
+        if validated["source_manifest"] != expected_source:
+            raise SelectionError(
+                f"profile {profile_path} is not bound to the selected C manifest"
+            )
+        profiled_config = validated["resolved_config"]
+        profiled_model = profiled_config["model"]
+        if index == 0:
+            required_model_fields = MODEL_INHERITABLE_FIELDS
+            if profiled_model.get("student_arch") != "transformer":
+                raise SelectionError("Conformer target profile must be Transformer")
+        else:
+            required_model_fields = tuple(
+                field
+                for field in MODEL_INHERITABLE_FIELDS
+                if field not in {"student_arch", "student_ffn_dim"}
+            )
+            if profiled_model.get("student_arch") != "conformer":
+                raise SelectionError(
+                    f"candidate profile {profile_path} is not Conformer"
+                )
+        for field in required_model_fields:
+            _assert_config_value(
+                selected=selected_config,
+                profiled=profiled_config,
+                section="model",
+                field=field,
+                profile_path=profile_path,
+            )
+        for field in CRITERION_INHERITABLE_FIELDS:
+            _assert_config_value(
+                selected=selected_config,
+                profiled=profiled_config,
+                section="criterion",
+                field=field,
+                profile_path=profile_path,
+            )
+        for section, fields in SECTION_INHERITABLE_FIELDS.items():
+            for field in fields:
+                _assert_config_value(
+                    selected=selected_config,
+                    profiled=profiled_config,
+                    section=section,
+                    field=field,
+                    profile_path=profile_path,
+                )
+        for field in TASK_NOISE_FIELDS:
+            _assert_config_value(
+                selected=selected_config,
+                profiled=profiled_config,
+                section="task",
+                field=field,
+                profile_path=profile_path,
+            )
+        for field in MODEL_NOISE_FIELDS:
+            _assert_config_value(
+                selected=selected_config,
+                profiled=profiled_config,
+                section="model",
+                field=field,
+                profile_path=profile_path,
+            )
 
 
 def create_selection(
@@ -317,6 +504,14 @@ def create_selection(
             str(experiment): list(overrides)
             for experiment, overrides in (overrides_by_experiment or {}).items()
         },
+        "conformer_match": (
+            {
+                "path": conformer_match_record["path"],
+                "sha256": conformer_match_record["sha256"],
+            }
+            if conformer_match_record is not None
+            else None
+        ),
     }
 
     def existing_matches(existing: Mapping[str, Any]) -> bool:
@@ -331,6 +526,14 @@ def create_selection(
             "selected_manifest": existing.get("selected_manifest"),
             "materialized_overrides": existing.get("materialized_overrides", []),
             "overrides_by_experiment": existing.get("overrides_by_experiment", {}),
+            "conformer_match": (
+                {
+                    "path": existing["conformer_match"].get("path"),
+                    "sha256": existing["conformer_match"].get("sha256"),
+                }
+                if isinstance(existing.get("conformer_match"), Mapping)
+                else None
+            ),
         }
         return existing_request == static_request
 
@@ -361,6 +564,21 @@ def create_selection(
             }
         )
     selected_manifest = ManifestStore(selected_path).read()
+    if conformer_match_record is not None:
+        _verify_conformer_match_binding(
+            conformer_match_record,
+            selected_path=selected_path,
+            selected_manifest=selected_manifest,
+        )
+    public_conformer_match = (
+        {
+            key: value
+            for key, value in conformer_match_record.items()
+            if not key.startswith("_")
+        }
+        if conformer_match_record is not None
+        else None
+    )
     record: Dict[str, Any] = {
         "schema_version": SELECTION_SCHEMA,
         "kind": kind,
@@ -377,7 +595,7 @@ def create_selection(
             for candidate in candidate_records
             if candidate["manifest"] == str(selected_path)
         ),
-        "conformer_match": conformer_match_record,
+        "conformer_match": public_conformer_match,
         "materialized_overrides": list(materialized_overrides or ()),
         "overrides_by_experiment": {
             str(experiment): list(overrides)
@@ -434,7 +652,17 @@ def read_selection(path: os.PathLike[str] | str) -> Dict[str, Any]:
         if not isinstance(conformer_match, Mapping):
             raise SelectionError("c_to_d selection lacks Conformer matching evidence")
         current_match = _load_conformer_match(conformer_match.get("path", ""))
-        if current_match != conformer_match:
+        _verify_conformer_match_binding(
+            current_match,
+            selected_path=selected_manifest,
+            selected_manifest=manifest,
+        )
+        current_public_match = {
+            key: value
+            for key, value in current_match.items()
+            if not key.startswith("_")
+        }
+        if current_public_match != conformer_match:
             raise SelectionError("Conformer matching evidence has changed")
     expected = sha256_json(
         {key: value for key, value in record.items() if key != "selection_sha256"}

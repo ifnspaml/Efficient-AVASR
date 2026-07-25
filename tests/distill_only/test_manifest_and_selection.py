@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import importlib.util
 import tempfile
 import unittest
+from argparse import ArgumentTypeError
 from pathlib import Path
+from typing import Optional
 
 from chapter3_distill_only.manifest import (
     LIFECYCLE,
@@ -14,7 +17,11 @@ from chapter3_distill_only.manifest import (
     sha256_file,
     utc_now,
 )
-from chapter3_distill_only.profiling import select_conformer_ffn_match
+from chapter3_distill_only.profiling import (
+    profile_architecture_fields,
+    select_conformer_ffn_match,
+    validate_config_profile,
+)
 from chapter3_distill_only.selection import (
     SelectionError,
     create_selection,
@@ -23,6 +30,16 @@ from chapter3_distill_only.selection import (
     require_final_selection,
     read_selection,
 )
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+MATCH_TOOL = REPO_ROOT / "scripts" / "distill_only" / "match_conformer.py"
+MATCH_SPEC = importlib.util.spec_from_file_location(
+    "chapter3_test_match_conformer", MATCH_TOOL
+)
+assert MATCH_SPEC is not None and MATCH_SPEC.loader is not None
+match_tool = importlib.util.module_from_spec(MATCH_SPEC)
+MATCH_SPEC.loader.exec_module(match_tool)
+_candidate = match_tool._candidate
 
 
 def _advance_to_validation(store: ManifestStore) -> None:
@@ -39,6 +56,149 @@ def _advance_to_validation(store: ManifestStore) -> None:
     store.update({"measurements": {"wer": {"validation": measurements}}})
     for state in LIFECYCLE[1 : LIFECYCLE.index("validation_complete") + 1]:
         store.transition(state)
+
+
+def _resolved_profile_config(
+    *,
+    architecture: str,
+    ffn_dim: int,
+    depth: int = 6,
+    embed_dim: int = 384,
+    heads: int = 12,
+) -> dict:
+    return {
+        "model": {
+            "student_arch": architecture,
+            "student_depth": depth,
+            "student_embed_dim": embed_dim,
+            "student_ffn_dim": ffn_dim,
+            "student_attention_heads": heads,
+            "student_conformer_kernel": 31,
+            "student_conformer_attention_type": "original",
+            "student_conformer_position_type": "abs",
+            "distill_head_mode": "historical_pred_heads",
+            "prediction_head_hidden_dim": -1,
+            "teacher_target_layers": "0,4,8,12",
+            "student_match_layers": "",
+            "initialization_policy": "random_sequence_teacher_frontend",
+            "distill_loss_type": "historical",
+            "l1_weight": 1.0,
+            "l2_weight": 0.0,
+            "cosine_weight": 1.0,
+            "cosine_type": "log_sig",
+            "feature_penalty_weight": 0.0,
+        },
+        "criterion": {
+            "distill_loss_type": "historical",
+            "l1_weight": 1.0,
+            "l2_weight": 0.0,
+            "cosine_weight": 1.0,
+            "cosine_type": "log_sig",
+            "feature_penalty_weight": 0.0,
+        },
+        "dataset": {"max_tokens": 4000},
+        "optimization": {
+            "max_update": 75000,
+            "clip_norm": 10.0,
+            "update_freq": [4],
+            "lr": [0.002],
+        },
+        "optimizer": {
+            "_name": "adam",
+            "adam_betas": "(0.9,0.999)",
+            "adam_eps": 1e-8,
+            "weight_decay": 0.0,
+        },
+        "lr_scheduler": {
+            "_name": "polynomial_decay",
+            "power": 1,
+            "warmup_updates": 15000,
+            "total_num_update": 75000,
+        },
+    }
+
+
+def _profile(
+    source: ManifestStore,
+    *,
+    architecture: str,
+    ffn_dim: int,
+    parameters: int,
+    flops: int,
+    depth: int = 6,
+    embed_dim: int = 384,
+    heads: int = 12,
+) -> dict:
+    manifest = source.read()
+    return {
+        "schema_version": "chapter3-config-profile/v1",
+        "source_manifest": {
+            "path": str(source.path.resolve()),
+            "immutable_sha256": manifest["immutable_sha256"],
+            "config_digest": manifest["immutable"].get("config_digest"),
+        },
+        "resolved_config": _resolved_profile_config(
+            architecture=architecture,
+            ffn_dim=ffn_dim,
+            depth=depth,
+            embed_dim=embed_dim,
+            heads=heads,
+        ),
+        "student_arch": architecture,
+        "student_depth": depth,
+        "student_embed_dim": embed_dim,
+        "student_ffn_dim": ffn_dim,
+        "student_attention_heads": heads,
+        "deployed_backbone_parameters": parameters,
+        "flops": flops,
+    }
+
+
+def _write_match(
+    root: Path,
+    source: ManifestStore,
+    *,
+    suffix: str = "",
+    source_override: Optional[ManifestStore] = None,
+    candidate_depth: int = 6,
+) -> tuple[Path, Path, Path]:
+    profile_source = source_override or source
+    target_path = root / f"transformer{suffix}.json"
+    conformer_path = root / f"conformer_1536{suffix}.json"
+    target = _profile(
+        profile_source,
+        architecture="transformer",
+        ffn_dim=3200,
+        parameters=1000,
+        flops=2000,
+    )
+    conformer = _profile(
+        profile_source,
+        architecture="conformer",
+        ffn_dim=1536,
+        parameters=1010,
+        flops=1990,
+        depth=candidate_depth,
+    )
+    atomic_write_json(target_path, target)
+    atomic_write_json(conformer_path, conformer)
+    candidate = {
+        **conformer,
+        "profile_path": str(conformer_path.resolve()),
+        "profile_sha256": sha256_file(conformer_path),
+    }
+    match = select_conformer_ffn_match(target, (candidate,))
+    match.update(
+        {
+            "schema_version": "chapter3-conformer-match/v1",
+            "created_at": utc_now(),
+            "target_profile_path": str(target_path.resolve()),
+            "target_profile_sha256": sha256_file(target_path),
+        }
+    )
+    match_path = root / f"conformer_match{suffix}.json"
+    atomic_write_json(match_path, match)
+    return match_path, target_path, conformer_path
 
 
 class ManifestStoreTest(unittest.TestCase):
@@ -154,49 +314,20 @@ class SelectionGateTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             candidate_manifest = ManifestStore(root / "c2")
-            candidate_manifest.create({"experiment": "C2"})
-            _advance_to_validation(candidate_manifest)
-
-            target_path = root / "transformer.json"
-            conformer_path = root / "conformer_1536.json"
-            atomic_write_json(
-                target_path,
+            candidate_manifest.create(
                 {
-                    "deployed_backbone_parameters": 1000,
-                    "flops": 2000,
-                },
-            )
-            atomic_write_json(
-                conformer_path,
-                {
-                    "deployed_backbone_parameters": 1010,
-                    "flops": 1990,
-                },
-            )
-            candidate_profile = {
-                "deployed_backbone_parameters": 1010,
-                "flops": 1990,
-                "student_ffn_dim": 1536,
-                "profile_path": str(conformer_path.resolve()),
-                "profile_sha256": sha256_file(conformer_path),
-            }
-            match = select_conformer_ffn_match(
-                {
-                    "deployed_backbone_parameters": 1000,
-                    "flops": 2000,
-                },
-                (candidate_profile,),
-            )
-            match.update(
-                {
-                    "schema_version": "chapter3-conformer-match/v1",
-                    "created_at": utc_now(),
-                    "target_profile_path": str(target_path.resolve()),
-                    "target_profile_sha256": sha256_file(target_path),
+                    "experiment": "C2",
+                    "config_digest": "c2-config",
+                    "resolved_config": _resolved_profile_config(
+                        architecture="transformer",
+                        ffn_dim=3200,
+                    ),
                 }
             )
-            match_path = root / "conformer_match.json"
-            atomic_write_json(match_path, match)
+            _advance_to_validation(candidate_manifest)
+            match_path, _, conformer_path = _write_match(
+                root, candidate_manifest
+            )
 
             selection_path = root / "c_to_d.json"
             record = create_selection(
@@ -212,9 +343,151 @@ class SelectionGateTest(unittest.TestCase):
             self.assertEqual(
                 record["conformer_match"]["selected_student_ffn_dim"], 1536
             )
+            identical = create_selection(
+                selection_path,
+                kind="c_to_d",
+                candidates=(candidate_manifest.path,),
+                selected=candidate_manifest.path,
+                metric="validation_babble_0db_wer",
+                rationale="profile-matched control",
+                approver="unit-test",
+                conformer_match=match_path,
+            )
+            self.assertEqual(
+                identical["selection_sha256"], record["selection_sha256"]
+            )
+            alternate_match = root / "alternate_match.json"
+            alternate_match.write_bytes(match_path.read_bytes())
+            with self.assertRaises(SelectionError):
+                create_selection(
+                    selection_path,
+                    kind="c_to_d",
+                    candidates=(candidate_manifest.path,),
+                    selected=candidate_manifest.path,
+                    metric="validation_babble_0db_wer",
+                    rationale="profile-matched control",
+                    approver="unit-test",
+                    conformer_match=alternate_match,
+                )
             conformer_path.write_text("{}\n", encoding="utf-8")
             with self.assertRaises(SelectionError):
                 read_selection(selection_path)
+
+    def test_conformer_match_rejects_wrong_source_and_architecture(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            selected = ManifestStore(root / "selected")
+            selected.create(
+                {
+                    "config_digest": "selected",
+                    "resolved_config": _resolved_profile_config(
+                        architecture="transformer", ffn_dim=3200
+                    ),
+                }
+            )
+            other = ManifestStore(root / "other")
+            other.create(
+                {
+                    "config_digest": "other",
+                    "resolved_config": _resolved_profile_config(
+                        architecture="transformer", ffn_dim=3200
+                    ),
+                }
+            )
+            _advance_to_validation(selected)
+            match_path, _, _ = _write_match(
+                root, selected, source_override=other
+            )
+            with self.assertRaisesRegex(
+                SelectionError, "not bound to the selected C manifest"
+            ):
+                create_selection(
+                    root / "wrong_source.json",
+                    kind="c_to_d",
+                    candidates=(selected.path,),
+                    selected=selected.path,
+                    metric="validation_babble_0db_wer",
+                    rationale="wrong source",
+                    approver="unit-test",
+                    conformer_match=match_path,
+                )
+
+            target = _profile(
+                selected,
+                architecture="transformer",
+                ffn_dim=3200,
+                parameters=1000,
+                flops=2000,
+            )
+            changed_depth = _profile(
+                selected,
+                architecture="conformer",
+                ffn_dim=1536,
+                parameters=1010,
+                flops=1990,
+                depth=12,
+            )
+            with self.assertRaisesRegex(ValueError, "student_depth"):
+                select_conformer_ffn_match(target, (changed_depth,))
+
+    def test_match_cli_ffn_must_equal_profile(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = ManifestStore(root / "source")
+            source.create(
+                {
+                    "config_digest": "source",
+                    "resolved_config": _resolved_profile_config(
+                        architecture="transformer", ffn_dim=3200
+                    ),
+                }
+            )
+            profile_path = root / "conformer.json"
+            atomic_write_json(
+                profile_path,
+                _profile(
+                    source,
+                    architecture="conformer",
+                    ffn_dim=1536,
+                    parameters=1000,
+                    flops=2000,
+                ),
+            )
+            with self.assertRaises(ArgumentTypeError):
+                _candidate(f"2048={profile_path}")
+
+    def test_profile_schema_emits_resolved_architecture_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            source = ManifestStore(Path(directory) / "source")
+            source.create({"config_digest": "source"})
+            config = _resolved_profile_config(
+                architecture="conformer", ffn_dim=1536
+            )
+            fields = profile_architecture_fields(config["model"])
+            self.assertEqual(
+                fields,
+                {
+                    "student_arch": "conformer",
+                    "student_depth": 6,
+                    "student_embed_dim": 384,
+                    "student_ffn_dim": 1536,
+                    "student_attention_heads": 12,
+                },
+            )
+            profile = {
+                **_profile(
+                    source,
+                    architecture="conformer",
+                    ffn_dim=1536,
+                    parameters=1000,
+                    flops=2000,
+                ),
+                **fields,
+            }
+            validated = validate_config_profile(
+                profile, expected_arch="conformer"
+            )
+            self.assertEqual(validated["student_ffn_dim"], 1536)
 
     def test_selected_controls_inherit_batch_but_e2_owns_noise(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
