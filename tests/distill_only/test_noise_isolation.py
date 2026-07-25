@@ -31,6 +31,7 @@ class NoiseIsolationTest(unittest.TestCase):
             observed[split] = {
                 "probability": instance.cfg.noise_prob,
                 "root": instance.cfg.noise_wav,
+                "method": instance.cfg.noise_method,
             }
             instance.datasets[split] = SimpleNamespace(
                 noise_prob=instance.cfg.noise_prob,
@@ -43,13 +44,17 @@ class NoiseIsolationTest(unittest.TestCase):
             task.load_dataset("valid")
             task.load_dataset("train")
 
-        self.assertEqual(observed["valid"], {"probability": 0.0, "root": None})
+        self.assertEqual(
+            observed["valid"],
+            {"probability": 0.0, "root": None, "method": "rms"},
+        )
         self.assertEqual(
             observed["train"],
-            {"probability": 0.25, "root": "/fixed/noise"},
+            {"probability": 0.25, "root": "/fixed/noise", "method": "rms"},
         )
         self.assertEqual(task.cfg.noise_prob, 0.25)
         self.assertEqual(task.cfg.noise_wav, "/fixed/noise")
+        self.assertEqual(task.cfg.noise_method, "rms")
 
 
 if __name__ == "__main__":

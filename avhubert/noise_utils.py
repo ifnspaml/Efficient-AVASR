@@ -130,6 +130,30 @@ def add_noise_itut(clean_wav, noise_wavs, noise_snr=0, speech_level_dbov=-26):
     return _float_pcm_to_int16(result.mixture)
 
 
+def require_noise_method_available(noise_method: str) -> None:
+    """Fail fast when a requested noise mixer cannot be imported.
+
+    RMS needs no extra package. ITU-T / P.56 require the sibling
+    ``itut_p56_noise_addition`` package and its ``LevelMeter`` /
+    ``add_noise_at_snr`` entry points. This helper does not change mixing
+    mathematics; it only verifies importability before decoding starts.
+    """
+
+    method = str(noise_method).lower()
+    if method == NOISE_METHOD_RMS:
+        return
+    if method in {NOISE_METHOD_ITUT, NOISE_METHOD_P56}:
+        level_meter_cls, add_noise_at_snr = _get_itut_noise_tools()
+        if level_meter_cls is None or add_noise_at_snr is None:
+            raise ImportError(
+                f"noise_method={method!r} resolved incomplete ITU-T imports"
+            )
+        return
+    raise ValueError(
+        f"noise_method must be one of {sorted(NOISE_METHODS)}, got {noise_method!r}"
+    )
+
+
 def add_noise(clean_wav, noise_wavs, noise_snr=0, noise_method=NOISE_METHOD_RMS):
     noise_method = noise_method.lower()
     if noise_method == NOISE_METHOD_RMS:

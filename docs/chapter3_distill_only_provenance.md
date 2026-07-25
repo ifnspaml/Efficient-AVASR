@@ -247,6 +247,25 @@ The old dataset will use a split-specific noise manifest for any constructed
 split. The Chapter 3 task intentionally tightens this to train-only noise and
 forces validation/test distillation data to remain clean.
 
+Chapter 3 reported post-fine-tuning evaluation is separate from that
+train-time mixer:
+
+- Noisy encoder distillation (E2) and downstream ASR fine-tuning continue to
+  use RMS mixing at probability `0.25` and SNR `0 dB`.
+- Screening validation and final inference exclusively use ITU-T P.56 through
+  the existing `avhubert.noise_utils.add_noise(..., noise_method="itut")`
+  path. No second mixer is introduced.
+- The versioned protocol is
+  `scripts/distill_only/evaluation_protocol_itut.yaml`
+  (`chapter3-evaluation/v1`), with evaluation seed `1337` and speech level
+  `-26 dBov`.
+- Screening covers `clean`, `babble_0db`, and `speech_0db` on LRS3 `valid`.
+- Final evaluation covers clean plus babble/music/speech at
+  `-10/-5/0/5/10` dB on both `valid` and `test` (16 conditions per subset,
+  32 decode commands total).
+- Artifacts land under `evaluation/screening/itut/...` and
+  `evaluation/final/itut/...` so they cannot collide with RMS result trees.
+
 ### Checkpoint save and resume
 
 - `s3prl/pretrain/runner.py`

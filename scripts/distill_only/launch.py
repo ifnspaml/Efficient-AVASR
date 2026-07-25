@@ -21,6 +21,15 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from chapter3_distill_only.evaluation import (  # noqa: E402
+    DEFAULT_PROTOCOL_PATH,
+    EvaluationCondition,
+    EvaluationProtocol,
+    EvaluationProtocolError,
+    load_evaluation_protocol,
+    measurement_metadata,
+    validate_protocol_artifacts,
+)
 from chapter3_distill_only.manifest import (  # noqa: E402
     ManifestError,
     ManifestStore,
@@ -57,6 +66,13 @@ FIXED_FILE_SHA256 = {
 }
 CONFIG_ROOT = REPO_ROOT / "avhubert" / "conf" / "distill_only"
 OUTPUT_ROOT = REPO_ROOT / "exp" / "chapter3_distill_only"
+DEFAULT_EVALUATION_PROTOCOL = DEFAULT_PROTOCOL_PATH
+NOISE_OVERRIDE_KEYS = (
+    "override.noise_wav",
+    "override.noise_prob",
+    "override.noise_snr",
+    "override.noise_method",
+)
 SELECTED_EXPERIMENTS = {
     "d1_selected_transformer",
     "d2_selected_conformer",
@@ -351,6 +367,17 @@ def validate_safe_config(config: Mapping[str, Any]) -> None:
             errors.append("the configured noisy control must use probability 0.25")
         if float(_get(config, "task.noise_snr", 999)) != 0:
             errors.append("the configured noisy control must use SNR 0 dB")
+        if str(_get(config, "task.noise_method", "")).lower() != "rms":
+            errors.append("active encoder-training noise must use task.noise_method=rms")
+        if str(_get(config, "task.distillation_noise_method", "")).lower() != "rms":
+            errors.append(
+                "active encoder-training noise must use "
+                "task.distillation_noise_method=rms"
+            )
+    for dotted in ("task.noise_method", "task.distillation_noise_method"):
+        method = str(_get(config, dotted, "rms")).lower()
+        if method == "itut":
+            errors.append(f"{dotted}=itut is forbidden during encoder training")
     flattened = json.dumps(config, sort_keys=True).lower()
     for forbidden in ("log_alpha", "lagrange", "physical_prun"):
         if forbidden in flattened:
@@ -816,70 +843,134 @@ def _finetune_command(args: argparse.Namespace) -> tuple[list[str], Path]:
     student = args.run_dir / "export" / "student.pt"
     _require_path(student, "exported student checkpoint", directory=False)
     output = args.run_dir / "finetune"
-    return (
-        [
-            args.fairseq_train,
-            "--config-dir",
-            str(REPO_ROOT / "avhubert" / "conf" / "av-finetune"),
-            "--config-name",
-            "base_noise_pt_noise_ft_433h.yaml",
-            f"task.data={args.data}",
-            f"task.label_dir={args.data}",
-            f"task.tokenizer_bpe_model={args.tokenizer}",
-            f"task.noise_wav={args.noise_root}",
-            "task.noise_prob=0.25",
-            "task.noise_snr=0",
-            f"model.w2v_path={student}",
-            f"distributed_training.distributed_world_size={args.gpus}",
-            f"distributed_training.nprocs_per_node={args.gpus}",
-            f"optimization.update_freq=[{args.finetune_update_freq}]",
-            f"dataset.num_workers={args.workers}",
-            f"common.seed={args.seed}",
-            f"common.user_dir={REPO_ROOT / 'chapter3_distill_only'}",
-            f"hydra.run.dir={output}",
-        ],
-        output,
+    command = [
+        args.fairseq_train,
+        "--config-dir",
+        str(REPO_ROOT / "avhubert" / "conf" / "av-finetune"),
+        "--config-name",
+        "base_noise_pt_noise_ft_433h.yaml",
+        f"task.data={args.data}",
+        f"task.label_dir={args.data}",
+        f"task.tokenizer_bpe_model={args.tokenizer}",
+        f"task.noise_wav={args.noise_root}",
+        "task.noise_prob=0.25",
+        "task.noise_snr=0",
+        "task.noise_num=1",
+        "task.noise_method=rms",
+        f"model.w2v_path={student}",
+        f"distributed_training.distributed_world_size={args.gpus}",
+        f"distributed_training.nprocs_per_node={args.gpus}",
+        f"optimization.update_freq=[{args.finetune_update_freq}]",
+        f"dataset.num_workers={args.workers}",
+        f"common.seed={args.seed}",
+        f"common.user_dir={REPO_ROOT / 'chapter3_distill_only'}",
+        f"hydra.run.dir={output}",
+    ]
+    _assert_command_rejects_itut_training(command, label="fine-tuning")
+    return command, output
+
+
+def _assert_command_rejects_itut_training(
+    command: Sequence[str], *, label: str
+) -> None:
+    for token in command:
+        if str(token).startswith("task.noise_method=itut") or str(token).startswith(
+            "task.distillation_noise_method=itut"
+        ):
+            raise PreflightError(f"{label} must not use ITU-T training noise: {token}")
+
+
+def _subset_measurement_key(subset: str) -> str:
+    return "validation" if subset == "valid" else subset
+
+
+def _decode_command_for_condition(
+    args: argparse.Namespace,
+    protocol: EvaluationProtocol,
+    condition: EvaluationCondition,
+    *,
+    checkpoint: Path,
+) -> tuple[EvaluationCondition, list[str], Path]:
+    result_dir = (
+        args.run_dir
+        / "evaluation"
+        / condition.output_relative(protocol_noise_method=protocol.noise_method)
     )
-
-
-def _decode_commands(args: argparse.Namespace, subset: str) -> list[tuple[str, list[str], Path]]:
-    checkpoint = args.run_dir / "finetune" / "checkpoints" / "checkpoint_best.pt"
-    _require_path(checkpoint, "fine-tuning checkpoint", directory=False)
-    conditions = [("clean", None)]
-    if subset in ("valid", "test"):
-        conditions.append(("babble_0db", DEFAULT_NOISE.parent / "babble"))
-    output = []
-    for condition, noise_path in conditions:
-        result_dir = args.run_dir / "evaluation" / condition / subset
-        command = [
-            sys.executable,
-            "-B",
-            str(REPO_ROOT / "avhubert" / "infer_s2s.py"),
-            "--config-dir",
-            str(REPO_ROOT / "avhubert" / "conf"),
-            "--config-name",
-            "s2s_decode.yaml",
-            f"dataset.gen_subset={subset}",
-            f"common_eval.path={checkpoint}",
-            f"common_eval.results_path={result_dir}",
-            "override.modalities=['audio','video']",
-            f"hydra.run.dir={result_dir}",
-            f"common.user_dir={REPO_ROOT / 'chapter3_distill_only'}",
-        ]
-        if noise_path is not None:
-            command.extend(
-                (
-                    f"override.noise_wav={noise_path}",
-                    "override.noise_prob=1",
-                    "override.noise_snr=0",
-                    "override.noise_method=rms",
+    command = [
+        sys.executable,
+        "-B",
+        str(REPO_ROOT / "avhubert" / "infer_s2s.py"),
+        "--config-dir",
+        str(REPO_ROOT / "avhubert" / "conf"),
+        "--config-name",
+        "s2s_decode.yaml",
+        f"dataset.gen_subset={condition.subset}",
+        f"common_eval.path={checkpoint}",
+        f"common_eval.results_path={result_dir}",
+        "override.modalities=['audio','video']",
+        f"hydra.run.dir={result_dir}",
+        f"common.user_dir={REPO_ROOT / 'chapter3_distill_only'}",
+        f"common.seed={protocol.evaluation_seed}",
+    ]
+    if condition.noise_type is None:
+        for key in NOISE_OVERRIDE_KEYS:
+            if any(str(token).startswith(f"{key}=") for token in command):
+                raise PreflightError(
+                    f"clean decode command must omit {key}: {condition.name}"
                 )
+    else:
+        if condition.noise_method != protocol.noise_method:
+            raise PreflightError(
+                "reported evaluation cannot replace "
+                f"override.noise_method={protocol.noise_method}"
             )
-        output.append((condition, command, result_dir))
-    return output
+        if condition.noise_root is None or condition.snr_db is None:
+            raise PreflightError(f"incomplete noisy condition: {condition.name}")
+        command.extend(
+            (
+                f"override.noise_wav={condition.noise_root}",
+                "override.noise_prob=1",
+                f"override.noise_snr={condition.snr_db}",
+                f"override.noise_method={protocol.noise_method}",
+            )
+        )
+        if not any(
+            str(token) == f"override.noise_method={protocol.noise_method}"
+            for token in command
+        ):
+            raise PreflightError("noisy evaluation lost the protocol noise method")
+    return condition, command, result_dir
 
 
-def _wer_measurement(result_dir: Path) -> Dict[str, Any]:
+def _decode_commands(
+    args: argparse.Namespace,
+    *,
+    phase: str,
+    require_checkpoint: bool = True,
+    validate_artifacts: bool = True,
+) -> list[tuple[EvaluationCondition, list[str], Path]]:
+    protocol: EvaluationProtocol = args.evaluation_protocol_obj
+    checkpoint = args.run_dir / "finetune" / "checkpoints" / "checkpoint_best.pt"
+    if require_checkpoint:
+        _require_path(checkpoint, "fine-tuning checkpoint", directory=False)
+    elif not checkpoint.exists():
+        checkpoint = Path("/nonexistent/finetune/checkpoints/checkpoint_best.pt")
+    if validate_artifacts:
+        validate_protocol_artifacts(protocol, phases=(phase,))
+    return [
+        _decode_command_for_condition(
+            args, protocol, condition, checkpoint=checkpoint
+        )
+        for condition in protocol.conditions(phase)
+    ]
+
+
+def _wer_measurement(
+    result_dir: Path,
+    *,
+    protocol: EvaluationProtocol,
+    condition: EvaluationCondition,
+) -> Dict[str, Any]:
     candidates = sorted(result_dir.glob("wer.*"))
     if not candidates:
         raise PreflightError(f"decoder produced no WER artifact in {result_dir}")
@@ -889,11 +980,13 @@ def _wer_measurement(result_dir: Path) -> Dict[str, Any]:
         value = float(first_line.split(":", 1)[1].strip().rstrip("%"))
     except (IndexError, ValueError) as exc:
         raise PreflightError(f"cannot parse WER from {artifact}: {first_line!r}") from exc
-    return {
-        "value": value,
-        "artifact": str(artifact),
-        "artifact_sha256": sha256_file(artifact),
-    }
+    return measurement_metadata(
+        protocol,
+        condition,
+        value=value,
+        artifact=artifact,
+        artifact_sha256=sha256_file(artifact),
+    )
 
 
 def _checkpoint_num_updates(checkpoint: Path) -> int:
@@ -1005,10 +1098,13 @@ def _immutable_manifest(
         "data_test_manifest": sha256_file(args.data / "test.tsv"),
         "noise_train_manifest": sha256_file(args.noise_root / "train.tsv"),
     }
+    protocol: EvaluationProtocol = args.evaluation_protocol_obj
+    noise_prob = float(_get(config, "task.noise_prob", 0.0))
     return {
         "provenance": provenance,
         "experiment": args.experiment,
         "seed": args.seed,
+        "evaluation_seed": protocol.evaluation_seed,
         "config_path": str(args.config_path),
         "config_sha256": sha256_file(args.config_path),
         "config_digest": config_digest,
@@ -1022,15 +1118,42 @@ def _immutable_manifest(
             "tokenizer": str(args.tokenizer),
             "noise_manifest_root": str(args.noise_root),
             "output_directory": str(args.run_dir),
+            "evaluation_protocol": str(protocol.path),
         },
         "checkpoint_sha256": checkpoint_hashes,
+        "noise_protocol": {
+            "encoder_training": {
+                "mode": "rms" if noise_prob else "clean",
+                "noise_prob": noise_prob,
+                "noise_method": (
+                    str(_get(config, "task.noise_method", "rms"))
+                    if noise_prob
+                    else None
+                ),
+            },
+            "downstream_finetuning": {
+                "noise_prob": 0.25,
+                "noise_snr": 0,
+                "noise_num": 1,
+                "noise_method": "rms",
+            },
+            "reported_validation": {
+                "noise_method": protocol.noise_method,
+                "phase": "screening",
+            },
+            "reported_final_inference": {
+                "noise_method": protocol.noise_method,
+                "phase": "final",
+            },
+        },
+        "evaluation_protocol": protocol.with_manifest_hashes(),
     }
 
 
 def vars_for_manifest(args: argparse.Namespace) -> Dict[str, Any]:
     output = {}
     for key, value in vars(args).items():
-        if key in {"stage", "dry_run"}:
+        if key in {"stage", "dry_run", "evaluation_protocol_obj"}:
             continue
         output[key] = str(value) if isinstance(value, Path) else value
     return output
@@ -1116,6 +1239,7 @@ def _dry_run_plan(
                 command, _ = _encoder_command(
                     args, stage=stage, selection_overrides=selection_overrides
                 )
+                _assert_command_rejects_itut_training(command, label=stage)
                 commands[stage] = command
             elif stage == "export":
                 commands[stage] = _export_command(args)[0]
@@ -1123,11 +1247,40 @@ def _dry_run_plan(
             elif stage == "finetune":
                 commands[stage] = _finetune_command(args)[0]
             elif stage == "validate":
-                commands[stage] = [item[1] for item in _decode_commands(args, "valid")]
+                commands[stage] = [
+                    {
+                        "condition": condition.name,
+                        "subset": condition.subset,
+                        "phase": condition.evaluation_phase,
+                        "command": command,
+                        "output": str(output),
+                    }
+                    for condition, command, output in _decode_commands(
+                        args,
+                        phase="screening",
+                        require_checkpoint=False,
+                        validate_artifacts=False,
+                    )
+                ]
             elif stage == "test":
-                commands[stage] = [item[1] for item in _decode_commands(args, "test")]
-        except PreflightError as exc:
+                commands[stage] = [
+                    {
+                        "condition": condition.name,
+                        "subset": condition.subset,
+                        "phase": condition.evaluation_phase,
+                        "command": command,
+                        "output": str(output),
+                    }
+                    for condition, command, output in _decode_commands(
+                        args,
+                        phase="final",
+                        require_checkpoint=False,
+                        validate_artifacts=False,
+                    )
+                ]
+        except (PreflightError, EvaluationProtocolError, ImportError) as exc:
             commands[stage] = {"blocked_until_dependency_exists": str(exc)}
+    protocol: EvaluationProtocol = args.evaluation_protocol_obj
     print(
         json.dumps(
             {
@@ -1135,6 +1288,14 @@ def _dry_run_plan(
                 "experiment": args.experiment,
                 "run_dir": str(args.run_dir),
                 "config_digest": config_digest,
+                "evaluation_protocol": {
+                    "path": str(protocol.path),
+                    "sha256": protocol.sha256,
+                    "evaluation_seed": protocol.evaluation_seed,
+                    "expected_final_condition_count": (
+                        protocol.expected_final_condition_count
+                    ),
+                },
                 "resolved_config": config,
                 "selection_overrides": list(selection_overrides),
                 "commands": commands,
@@ -1162,20 +1323,44 @@ def _reuse_selected_alias(
     selected = ManifestStore(selection_record["selected_manifest"])
     manifest = selected.read()
     if args.dry_run:
-        print(
-            json.dumps(
-                {
-                    "dry_run": True,
-                    "experiment": args.experiment,
-                    "action": "reuse_selected_run",
-                    "selected_manifest": str(selected.path.resolve()),
-                    "selected_state": manifest["state"],
-                    "requested_stage": args.stage,
-                },
-                indent=2,
-                sort_keys=True,
-            )
-        )
+        planned = {
+            "dry_run": True,
+            "experiment": args.experiment,
+            "action": "reuse_selected_run",
+            "selected_manifest": str(selected.path.resolve()),
+            "selected_state": manifest["state"],
+            "requested_stage": args.stage,
+        }
+        if args.stage in {"validate", "test"}:
+            phase = "screening" if args.stage == "validate" else "final"
+            args.run_dir = selected.path.parent
+            planned["commands"] = {
+                args.stage: [
+                    {
+                        "condition": condition.name,
+                        "subset": condition.subset,
+                        "phase": condition.evaluation_phase,
+                        "command": command,
+                        "output": str(output),
+                    }
+                    for condition, command, output in _decode_commands(
+                        args,
+                        phase=phase,
+                        require_checkpoint=False,
+                        validate_artifacts=False,
+                    )
+                ]
+            }
+            protocol: EvaluationProtocol = args.evaluation_protocol_obj
+            planned["evaluation_protocol"] = {
+                "path": str(protocol.path),
+                "sha256": protocol.sha256,
+                "evaluation_seed": protocol.evaluation_seed,
+                "expected_final_condition_count": (
+                    protocol.expected_final_condition_count
+                ),
+            }
+        print(json.dumps(planned, indent=2, sort_keys=True))
         return 0
     if args.stage == "test":
         if manifest["state"] == "test_complete":
@@ -1190,22 +1375,31 @@ def _reuse_selected_alias(
             current_manifest=selected.path,
         )
         args.run_dir = selected.path.parent
-        artifacts = {}
-        for condition, command, output in _decode_commands(args, "test"):
+        protocol: EvaluationProtocol = args.evaluation_protocol_obj
+        artifacts: Dict[str, Dict[str, str]] = {"validation": {}, "test": {}}
+        for condition, command, output in _decode_commands(args, phase="final"):
+            stage_name = f"final_{condition.subset}_{condition.name}"
             run_command(
                 command,
-                stage=f"test_{condition}",
+                stage=stage_name,
                 run_dir=args.run_dir,
                 manifest=selected,
             )
-            measurement = _wer_measurement(output)
-            artifacts[condition] = measurement["artifact"]
+            measurement = _wer_measurement(
+                output, protocol=protocol, condition=condition
+            )
+            subset_key = _subset_measurement_key(condition.subset)
+            artifacts[subset_key][condition.name] = measurement["artifact"]
             selected.update(
-                {"measurements": {"wer": {"test": {condition: measurement}}}}
+                {
+                    "measurements": {
+                        "wer": {"final": {subset_key: {condition.name: measurement}}}
+                    }
+                }
             )
         selected.transition(
             "test_complete",
-            values={"artifacts": {"test": artifacts}, "failure": None},
+            values={"artifacts": {"final": artifacts}, "failure": None},
         )
     else:
         selected.update(
@@ -1296,6 +1490,7 @@ def execute(args: argparse.Namespace) -> int:
             command, encoder_dir = _encoder_command(
                 args, stage=stage, selection_overrides=selection_overrides
             )
+            _assert_command_rejects_itut_training(command, label=stage)
             run_command(command, stage=stage, run_dir=args.run_dir, manifest=manifest)
             _record_actual_hydra_config(
                 manifest,
@@ -1392,18 +1587,27 @@ def execute(args: argparse.Namespace) -> int:
                 continue
             if state != "finetune_complete":
                 raise ManifestError(f"cannot validate from state {state}")
+            protocol = args.evaluation_protocol_obj
             artifacts = {}
-            for condition, command, output in _decode_commands(args, "valid"):
+            for condition, command, output in _decode_commands(
+                args, phase="screening"
+            ):
                 run_command(
                     command,
-                    stage=f"validate_{condition}",
+                    stage=f"validate_{condition.name}",
                     run_dir=args.run_dir,
                     manifest=manifest,
                 )
-                measurement = _wer_measurement(output)
-                artifacts[condition] = measurement["artifact"]
+                measurement = _wer_measurement(
+                    output, protocol=protocol, condition=condition
+                )
+                artifacts[condition.name] = measurement["artifact"]
                 manifest.update(
-                    {"measurements": {"wer": {"validation": {condition: measurement}}}}
+                    {
+                        "measurements": {
+                            "wer": {"validation": {condition.name: measurement}}
+                        }
+                    }
                 )
             manifest.transition(
                 "validation_complete",
@@ -1417,22 +1621,32 @@ def execute(args: argparse.Namespace) -> int:
             require_final_selection(
                 args.final_selection, current_manifest=manifest.path
             )
-            artifacts = {}
-            for condition, command, output in _decode_commands(args, "test"):
+            protocol = args.evaluation_protocol_obj
+            artifacts = {"validation": {}, "test": {}}
+            for condition, command, output in _decode_commands(args, phase="final"):
                 run_command(
                     command,
-                    stage=f"test_{condition}",
+                    stage=f"final_{condition.subset}_{condition.name}",
                     run_dir=args.run_dir,
                     manifest=manifest,
                 )
-                measurement = _wer_measurement(output)
-                artifacts[condition] = measurement["artifact"]
+                measurement = _wer_measurement(
+                    output, protocol=protocol, condition=condition
+                )
+                subset_key = _subset_measurement_key(condition.subset)
+                artifacts[subset_key][condition.name] = measurement["artifact"]
                 manifest.update(
-                    {"measurements": {"wer": {"test": {condition: measurement}}}}
+                    {
+                        "measurements": {
+                            "wer": {
+                                "final": {subset_key: {condition.name: measurement}}
+                            }
+                        }
+                    }
                 )
             manifest.transition(
                 "test_complete",
-                values={"artifacts": {"test": artifacts}, "failure": None},
+                values={"artifacts": {"final": artifacts}, "failure": None},
             )
     print(manifest.path)
     return 0
@@ -1458,6 +1672,21 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--output-root", type=Path, default=OUTPUT_ROOT)
     parser.add_argument("--run-dir", type=Path)
     parser.add_argument(
+        "--evaluation-protocol",
+        type=Path,
+        default=DEFAULT_EVALUATION_PROTOCOL,
+        help="Versioned ITU-T post-fine-tuning evaluation protocol YAML",
+    )
+    parser.add_argument(
+        "--evaluation-seed",
+        type=int,
+        default=None,
+        help=(
+            "Fixed seed for reported validation/inference noise selection; "
+            "defaults to the protocol evaluation_seed"
+        ),
+    )
+    parser.add_argument(
         "--final-selection",
         type=Path,
         default=OUTPUT_ROOT / "selection" / "final.json",
@@ -1481,6 +1710,26 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     if args.from_selection:
         args.from_selection = args.from_selection.resolve()
     args.final_selection = args.final_selection.resolve()
+    args.evaluation_protocol = args.evaluation_protocol.resolve()
+    try:
+        protocol = load_evaluation_protocol(args.evaluation_protocol)
+    except EvaluationProtocolError as exc:
+        parser.error(str(exc))
+    if args.evaluation_seed is not None:
+        protocol = EvaluationProtocol(
+            path=protocol.path,
+            schema_version=protocol.schema_version,
+            noise_method=protocol.noise_method,
+            evaluation_seed=args.evaluation_seed,
+            speech_level_dbov=protocol.speech_level_dbov,
+            noise_roots=protocol.noise_roots,
+            screening=protocol.screening,
+            final=protocol.final,
+            raw=protocol.raw,
+        )
+    else:
+        args.evaluation_seed = protocol.evaluation_seed
+    args.evaluation_protocol_obj = protocol
     if args.gpus != 1:
         parser.error("the controlled protocol requires exactly one GPU")
     if args.stage in ("stage1", "stage2") and args.experiment != "s2_optional_two_stage":
@@ -1498,7 +1747,14 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
 def main(argv: Optional[Sequence[str]] = None) -> int:
     try:
         return execute(parse_args(argv))
-    except (ManifestError, PreflightError, RuntimeError, ValueError) as exc:
+    except (
+        ManifestError,
+        PreflightError,
+        EvaluationProtocolError,
+        RuntimeError,
+        ValueError,
+        ImportError,
+    ) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
 

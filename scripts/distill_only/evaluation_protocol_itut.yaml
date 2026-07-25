@@ -1,0 +1,40 @@
+schema_version: chapter3-evaluation/v1
+
+noise_method: itut
+evaluation_seed: 1337
+speech_level_dbov: -26
+
+noise_roots:
+  babble: /beegfs/data/shared/lrs3/noise/musan/tsv/babble
+  music: /beegfs/data/shared/lrs3/noise/musan/tsv/music
+  speech: /beegfs/data/shared/lrs3/noise/speech
+
+screening_validation:
+  subset: valid
+  include_clean: true
+  conditions:
+    - name: babble_0db
+      noise_type: babble
+      snr_db: 0
+    - name: speech_0db
+      noise_type: speech
+      snr_db: 0
+
+final_evaluation:
+  subsets:
+    - valid
+    - test
+
+  include_clean: true
+
+  noise_types:
+    - babble
+    - music
+    - speech
+
+  snrs_db:
+    - -10
+    - -5
+    - 0
+    - 5
+    - 10

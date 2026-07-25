@@ -154,3 +154,98 @@ Stage 1 is ordinary 50k distillation. Stage 2 loads the stage-1 student and
 heads with `initialization_policy=warm_start_distilled`, then starts a fresh
 25k optimizer/scheduler. Interruption resume inside either stage uses that
 stage's own `checkpoint_last.pt`.
+
+## Noise protocol
+
+Training and reported evaluation deliberately use different mixers:
+
+| Stage | Noise |
+|---|---|
+| Encoder distillation (clean B/C/D/E1) | none (`task.noise_prob=0.0`) |
+| Encoder distillation (E2) | RMS, `p=0.25`, SNR `0 dB`, train-only |
+| Downstream ASR fine-tuning | RMS, `p=0.25`, SNR `0 dB`, `task.noise_num=1` |
+| Screening validation (`--stage validate`) | ITU-T P.56 |
+| Final inference (`--stage test`) | ITU-T P.56 |
+
+The versioned protocol file is
+`scripts/distill_only/evaluation_protocol_itut.yaml`
+(`schema_version: chapter3-evaluation/v1`). It is loaded by the launcher
+through `--evaluation-protocol` and recorded (path, SHA256, parsed matrix,
+evaluation seed, speech level `-26 dBov`, noise-root hashes) in every run
+manifest. Do not put evaluation-only fields into the Fairseq training
+Hydra schema.
+
+### Screening validation
+
+`--stage validate` decodes LRS3 `valid` only:
+
+| Condition | Method |
+|---|---|
+| `clean` | none |
+| `babble_0db` | ITU-T, babble, 0 dB |
+| `speech_0db` | ITU-T, speech, 0 dB |
+
+Selection locks continue to read only `clean` and `babble_0db`. Adding
+`speech_0db` does not change C-to-D or D-to-E selection rules.
+
+### Final evaluation
+
+After `selection/final.json` freezes the selected run to `selection_frozen`,
+`--stage test` expands the full matrix on both `valid` and `test`:
+
+- clean
+- babble / music / speech
+- SNRs `-10`, `-5`, `0`, `5`, `10` dB
+
+That is 16 conditions per subset and 32 decode commands in total. Stable
+condition names use `m` / `p` for signed SNRs (`babble_m10db`,
+`music_p5db`, …). Every noisy command forces:
+
+```text
+override.noise_prob=1
+override.noise_method=itut
+override.noise_snr=<snr>
+common.seed=<evaluation-seed>
+```
+
+The evaluation seed defaults to the protocol value `1337` and is independent
+of the model-training `--seed` so every model shares the same noise-selection
+protocol. Clean commands omit all `override.noise_*` keys.
+
+Results are stored under distinct trees so RMS and ITU-T never collide and
+screening never overwrites final artifacts:
+
+```text
+evaluation/screening/itut/{clean|babble|speech}/...
+evaluation/final/itut/{clean|babble|music|speech}/...
+```
+
+### Example dry runs
+
+```bash
+scripts/distill_only/launch.sh \
+  --experiment c2_t6_historical_heads \
+  --stage validate \
+  --evaluation-protocol scripts/distill_only/evaluation_protocol_itut.yaml \
+  --dry-run
+```
+
+After final selection:
+
+```bash
+scripts/distill_only/launch.sh \
+  --experiment s1_selected_main \
+  --stage test \
+  --from-selection exp/chapter3_distill_only/selection/final.json \
+  --evaluation-protocol scripts/distill_only/evaluation_protocol_itut.yaml \
+  --dry-run
+```
+
+ITU-T decoding requires the sibling package `itut_p56_noise_addition` (located
+by `avhubert/noise_utils.py`) and the noise manifests:
+
+- `/beegfs/data/shared/lrs3/noise/musan/tsv/babble/{valid,test}.tsv`
+- `/beegfs/data/shared/lrs3/noise/musan/tsv/music/{valid,test}.tsv`
+- `/beegfs/data/shared/lrs3/noise/speech/{valid,test}.tsv`
+
+Missing ITU-T support or manifests fails before the first decode command.
