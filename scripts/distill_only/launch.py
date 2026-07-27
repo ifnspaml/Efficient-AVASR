@@ -855,8 +855,6 @@ def _finetune_command(args: argparse.Namespace) -> tuple[list[str], Path]:
         f"task.noise_wav={args.noise_root}",
         "task.noise_prob=0.25",
         "task.noise_snr=0",
-        "task.noise_num=1",
-        "task.noise_method=rms",
         f"model.w2v_path={student}",
         f"distributed_training.distributed_world_size={args.gpus}",
         f"distributed_training.nprocs_per_node={args.gpus}",
@@ -1020,12 +1018,22 @@ def _device_index() -> int:
         return 0
 
 
+def wandb_env_for_stage(experiment: str, stage: str) -> Dict[str, str]:
+    """Name Fairseq wandb runs after the experiment instead of 'checkpoints'."""
+
+    return {
+        "WANDB_RUN_GROUP": experiment,
+        "WANDB_NAME": f"{experiment}-{stage}",
+    }
+
+
 def run_command(
     command: Sequence[str],
     *,
     stage: str,
     run_dir: Path,
     manifest: ManifestStore,
+    experiment: str,
 ) -> Dict[str, Any]:
     log_path = run_dir / "logs" / f"{stage}.log"
     log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1042,6 +1050,8 @@ def run_command(
             "failure": None,
         }
     )
+    env = os.environ.copy()
+    env.update(wandb_env_for_stage(experiment, stage))
     with log_path.open("a", encoding="utf-8") as log:
         log.write(f"\n[{started}] $ {shlex.join(map(str, command))}\n")
         log.flush()
@@ -1050,6 +1060,7 @@ def run_command(
             cwd=str(REPO_ROOT),
             stdout=log,
             stderr=subprocess.STDOUT,
+            env=env,
         )
         monitor = PeakMemoryMonitor(process.pid, device_index=_device_index()).start()
         returncode = process.wait()
@@ -1384,6 +1395,7 @@ def _reuse_selected_alias(
                 stage=stage_name,
                 run_dir=args.run_dir,
                 manifest=selected,
+                experiment=args.experiment,
             )
             measurement = _wer_measurement(
                 output, protocol=protocol, condition=condition
@@ -1491,7 +1503,13 @@ def execute(args: argparse.Namespace) -> int:
                 args, stage=stage, selection_overrides=selection_overrides
             )
             _assert_command_rejects_itut_training(command, label=stage)
-            run_command(command, stage=stage, run_dir=args.run_dir, manifest=manifest)
+            run_command(
+                command,
+                stage=stage,
+                run_dir=args.run_dir,
+                manifest=manifest,
+                experiment=args.experiment,
+            )
             _record_actual_hydra_config(
                 manifest,
                 stage=stage,
@@ -1532,7 +1550,13 @@ def execute(args: argparse.Namespace) -> int:
             if state != "encoder_complete":
                 raise ManifestError(f"cannot export from state {state}")
             command, output = _export_command(args)
-            run_command(command, stage=stage, run_dir=args.run_dir, manifest=manifest)
+            run_command(
+                command,
+                stage=stage,
+                run_dir=args.run_dir,
+                manifest=manifest,
+                experiment=args.experiment,
+            )
             _require_path(output, "exported checkpoint", directory=False)
             profile_command, profile_output = _profile_command(args)
             run_command(
@@ -1540,6 +1564,7 @@ def execute(args: argparse.Namespace) -> int:
                 stage="profile",
                 run_dir=args.run_dir,
                 manifest=manifest,
+                experiment=args.experiment,
             )
             try:
                 profile = json.loads(profile_output.read_text(encoding="utf-8"))
@@ -1567,7 +1592,13 @@ def execute(args: argparse.Namespace) -> int:
             elif state != "finetune_running":
                 raise ManifestError(f"cannot fine-tune from state {state}")
             command, output = _finetune_command(args)
-            run_command(command, stage=stage, run_dir=args.run_dir, manifest=manifest)
+            run_command(
+                command,
+                stage=stage,
+                run_dir=args.run_dir,
+                manifest=manifest,
+                experiment=args.experiment,
+            )
             checkpoint = output / "checkpoints" / "checkpoint_best.pt"
             _require_path(checkpoint, "fine-tuning checkpoint", directory=False)
             manifest.transition(
@@ -1597,6 +1628,7 @@ def execute(args: argparse.Namespace) -> int:
                     stage=f"validate_{condition.name}",
                     run_dir=args.run_dir,
                     manifest=manifest,
+                    experiment=args.experiment,
                 )
                 measurement = _wer_measurement(
                     output, protocol=protocol, condition=condition
@@ -1629,6 +1661,7 @@ def execute(args: argparse.Namespace) -> int:
                     stage=f"final_{condition.subset}_{condition.name}",
                     run_dir=args.run_dir,
                     manifest=manifest,
+                    experiment=args.experiment,
                 )
                 measurement = _wer_measurement(
                     output, protocol=protocol, condition=condition

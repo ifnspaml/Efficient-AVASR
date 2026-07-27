@@ -249,10 +249,12 @@ class EvaluationProtocolTest(unittest.TestCase):
             )
             command, _ = launcher._finetune_command(args)
             joined = " ".join(map(str, command))
-            self.assertIn("task.noise_method=rms", joined)
             self.assertIn("task.noise_prob=0.25", joined)
             self.assertIn("task.noise_snr=0", joined)
-            self.assertIn("task.noise_num=1", joined)
+            self.assertIn("task.noise_wav=", joined)
+            # Match DP finetune: only wav/prob/snr; noise_num/method use schema defaults (rms).
+            self.assertNotIn("task.noise_num=", joined)
+            self.assertNotIn("task.noise_method=", joined)
             self.assertNotIn("task.noise_method=itut", joined)
 
         e2_args = Namespace(

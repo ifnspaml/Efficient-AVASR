@@ -163,7 +163,7 @@ Training and reported evaluation deliberately use different mixers:
 |---|---|
 | Encoder distillation (clean B/C/D/E1) | none (`task.noise_prob=0.0`) |
 | Encoder distillation (E2) | RMS, `p=0.25`, SNR `0 dB`, train-only |
-| Downstream ASR fine-tuning | RMS, `p=0.25`, SNR `0 dB`, `task.noise_num=1` |
+| Downstream ASR fine-tuning | RMS, `p=0.25`, SNR `0 dB` (same overrides as DP: wav/prob/snr) |
 | Screening validation (`--stage validate`) | ITU-T P.56 |
 | Final inference (`--stage test`) | ITU-T P.56 |
 
