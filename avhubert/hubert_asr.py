@@ -373,9 +373,15 @@ class HubertEncoder(FairseqEncoder):
 
 
 class HubertEncoderWrapper(FairseqEncoder):
-    def __init__(self, w2v_model):
+    def __init__(self, w2v_model, cfg: AVHubertSeq2SeqConfig):
         super().__init__(None)
         self.w2v_model = w2v_model
+
+        d = w2v_model.encoder.embedding_dim
+        if getattr(cfg, "decoder_embed_dim", d) != d:
+            self.proj = Linear(d, cfg.decoder_embed_dim)
+        else:
+            self.proj = None
 
     def forward(self, source, padding_mask, **kwargs):
         w2v_args = {
@@ -386,6 +392,9 @@ class HubertEncoderWrapper(FairseqEncoder):
         x, padding_mask = self.w2v_model.extract_finetune(**w2v_args)
         # B x T x C -> T x B x C
         x = x.transpose(0, 1)
+
+        if self.proj:
+            x = self.proj(x)
 
         return {
             "encoder_out": x,  # T x B x C
@@ -468,7 +477,7 @@ class AVHubertSeq2Seq(FairseqEncoderDecoderModel):
 
         encoder_ = task_pretrain.build_model(w2v_args.model)
 
-        encoder = HubertEncoderWrapper(encoder_)
+        encoder = HubertEncoderWrapper(encoder_, cfg)
         if state is not None and not cfg.no_pretrained_weights:
             # set strict=False because we omit some modules
             del state['model']['mask_emb']
