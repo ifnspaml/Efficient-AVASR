@@ -2,6 +2,43 @@
 
 defaults:
   - base_continuous_75k
-  - _matrix/d1_selected_transformer
-  - _matrix/e1_selected_clean
-  - _matrix/s1_selected_main
+
+# Materialized final main-run default. Update and commit this delta only after
+# the validation-based scientific decision is frozen.
+model:
+  student_arch: transformer
+  student_depth: 6
+  student_embed_dim: 384
+  student_ffn_dim: 3200
+  student_attention_heads: 12
+  distill_head_mode: historical_pred_heads
+  teacher_target_layers: "0,4,8,12"
+  student_match_layers: ""
+  initialization_policy: random_sequence_teacher_frontend
+  schedule_mode: continuous_75k
+  max_update: 75000
+  warmup_updates: 15000
+  distillation_noise_prob: 0.0
+  distillation_noise_snr: "0"
+  distillation_noise_method: rms
+  distillation_noise_manifest_root: null
+  distillation_noise_train_only: true
+
+task:
+  noise_prob: 0.0
+  noise_snr: "0"
+  noise_method: rms
+  noise_wav: null
+  distillation_noise_prob: 0.0
+  distillation_noise_snr: "0"
+  distillation_noise_method: rms
+  distillation_noise_manifest_root: null
+  distillation_noise_train_only: true
+
+optimization:
+  max_update: 75000
+  lr: [0.002]
+
+lr_scheduler:
+  warmup_updates: 15000
+  total_num_update: 75000
