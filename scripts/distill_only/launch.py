@@ -44,6 +44,14 @@ from chapter3_distill_only.selection import (  # noqa: E402
     read_selection,
     require_final_selection,
 )
+from chapter3_distill_only.source_worktree import (  # noqa: E402
+    SourceWorktreeError,
+    create_source_worktree,
+    default_source_worktree_root,
+    render_stage_slurm_script,
+    require_manifest_source_snapshot,
+    verify_source_worktree,
+)
 
 
 BASELINE_BRANCH = "dev_li_pro6000"
@@ -467,39 +475,55 @@ def preflight(
     output_root: Path,
     run_dir: Path,
     selection_path: Optional[Path],
+    require_source_clean: bool = True,
 ) -> Dict[str, Any]:
     branch = _git("branch", "--show-current")
     commit = _git("rev-parse", "HEAD")
-    if branch == "dev_li":
-        raise PreflightError("branch dev_li is explicitly forbidden")
-    if branch != BASELINE_BRANCH and not branch.startswith("feat/"):
-        raise PreflightError(
-            f"expected {BASELINE_BRANCH} or a feature branch, found {branch}"
+    tree = _git("rev-parse", "HEAD^{tree}")
+    if require_source_clean:
+        if branch == "dev_li":
+            raise PreflightError("branch dev_li is explicitly forbidden")
+        if branch != BASELINE_BRANCH and not branch.startswith("feat/"):
+            raise PreflightError(
+                f"expected {BASELINE_BRANCH} or a feature branch, found {branch}"
+            )
+        ancestor = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(REPO_ROOT),
+                "merge-base",
+                "--is-ancestor",
+                BASELINE_COMMIT,
+                "HEAD",
+            ],
+            check=False,
         )
-    ancestor = subprocess.run(
-        ["git", "-C", str(REPO_ROOT), "merge-base", "--is-ancestor", BASELINE_COMMIT, "HEAD"],
-        check=False,
-    )
-    if ancestor.returncode:
-        raise PreflightError(f"HEAD does not descend from required baseline {BASELINE_COMMIT}")
-    worktree_status = _git("status", "--porcelain=v1", "--untracked-files=all")
-    if worktree_status:
-        raise PreflightError(
-            "worktree must be fully clean before launch so the implementation "
-            "commit identifies every executed file:\n" + worktree_status
+        if ancestor.returncode:
+            raise PreflightError(
+                f"HEAD does not descend from required baseline {BASELINE_COMMIT}"
+            )
+        worktree_status = _git(
+            "status", "--porcelain=v1", "--untracked-files=all"
         )
-    protected_diff = _git(
-        "diff",
-        "--name-only",
-        f"{BASELINE_COMMIT}..HEAD",
-        "--",
-        *PROTECTED_TRACKED_PATHS,
-    )
-    if protected_diff:
-        raise PreflightError(
-            "existing joint-DP files differ from the required baseline:\n"
-            + protected_diff
+        if worktree_status:
+            raise PreflightError(
+                "worktree must be fully clean before launch so the "
+                "implementation commit identifies every executed file:\n"
+                + worktree_status
+            )
+        protected_diff = _git(
+            "diff",
+            "--name-only",
+            f"{BASELINE_COMMIT}..HEAD",
+            "--",
+            *PROTECTED_TRACKED_PATHS,
         )
+        if protected_diff:
+            raise PreflightError(
+                "existing joint-DP files differ from the required baseline:\n"
+                + protected_diff
+            )
     _require_path(OLD_REPO, "historical distillation repository", directory=True)
     old_commit_process = subprocess.run(
         ["git", "-C", str(OLD_REPO), "rev-parse", "HEAD"],
@@ -534,7 +558,7 @@ def preflight(
     if float(_get(config, "task.noise_prob", 0.0)):
         _require_path(noise_root, "MUSAN noise manifest root", directory=True)
         _require_path(noise_root / "train.tsv", "training noise manifest", directory=False)
-    if not _within(output_root, OUTPUT_ROOT):
+    if require_source_clean and not _within(output_root, OUTPUT_ROOT):
         raise PreflightError(
             f"output root must remain within canonical isolation root {OUTPUT_ROOT}"
         )
@@ -552,6 +576,7 @@ def preflight(
     return {
         "branch": branch,
         "commit": commit,
+        "tree": tree,
         "remote": _git("remote", "get-url", "origin", check=False) or None,
         "tracked_status": [],
     }
@@ -694,7 +719,14 @@ def deduplicate_overrides(overrides: Iterable[str]) -> list[str]:
     return list(reversed(reversed_output))
 
 
+def _source_root(args: argparse.Namespace) -> Path:
+    """Return the pinned source root, falling back only for dry-run/tests."""
+
+    return Path(getattr(args, "source_root", REPO_ROOT)).resolve()
+
+
 def _base_overrides(args: argparse.Namespace, run_path: Path) -> list[str]:
+    source_root = _source_root(args)
     overrides = [
         f"task.data={args.data}",
         f"task.label_dir={args.data}",
@@ -706,7 +738,7 @@ def _base_overrides(args: argparse.Namespace, run_path: Path) -> list[str]:
         f"optimization.update_freq=[{args.update_freq}]",
         f"dataset.num_workers={args.workers}",
         f"common.seed={args.seed}",
-        f"common.user_dir={REPO_ROOT / 'chapter3_distill_only'}",
+        f"common.user_dir={source_root / 'chapter3_distill_only'}",
         f"hydra.run.dir={run_path}",
     ]
     if args.experiment == "e2_selected_noisy":
@@ -784,10 +816,11 @@ def _encoder_command(
             )
         )
     overrides.extend(args.override)
+    source_root = _source_root(args)
     command = [
         args.fairseq_train,
         "--config-dir",
-        str(CONFIG_ROOT),
+        str(source_root / "avhubert" / "conf" / "distill_only"),
         "--config-name",
         f"{args.experiment}.yaml",
         *deduplicate_overrides(overrides),
@@ -824,16 +857,22 @@ def _profile_command(args: argparse.Namespace) -> tuple[list[str], Path]:
     checkpoint = _encoder_checkpoint(args)
     _require_path(checkpoint, "encoder checkpoint", directory=False)
     output = args.run_dir / "measurements" / "profile.json"
+    source_root = _source_root(args)
     return (
         [
             sys.executable,
-            str(Path(__file__).with_name("profile_checkpoint.py")),
+            str(
+                source_root
+                / "scripts"
+                / "distill_only"
+                / "profile_checkpoint.py"
+            ),
             "--checkpoint",
             str(checkpoint),
             "--output",
             str(output),
             "--user-dir",
-            str(REPO_ROOT / "chapter3_distill_only"),
+            str(source_root / "chapter3_distill_only"),
         ],
         output,
     )
@@ -843,10 +882,11 @@ def _finetune_command(args: argparse.Namespace) -> tuple[list[str], Path]:
     student = args.run_dir / "export" / "student.pt"
     _require_path(student, "exported student checkpoint", directory=False)
     output = args.run_dir / "finetune"
+    source_root = _source_root(args)
     command = [
         args.fairseq_train,
         "--config-dir",
-        str(REPO_ROOT / "avhubert" / "conf" / "av-finetune"),
+        str(source_root / "avhubert" / "conf" / "av-finetune"),
         "--config-name",
         "base_noise_pt_noise_ft_433h.yaml",
         f"task.data={args.data}",
@@ -861,7 +901,7 @@ def _finetune_command(args: argparse.Namespace) -> tuple[list[str], Path]:
         f"optimization.update_freq=[{args.finetune_update_freq}]",
         f"dataset.num_workers={args.workers}",
         f"common.seed={args.seed}",
-        f"common.user_dir={REPO_ROOT / 'chapter3_distill_only'}",
+        f"common.user_dir={source_root / 'chapter3_distill_only'}",
         f"hydra.run.dir={output}",
     ]
     _assert_command_rejects_itut_training(command, label="fine-tuning")
@@ -894,12 +934,13 @@ def _decode_command_for_condition(
         / "evaluation"
         / condition.output_relative(protocol_noise_method=protocol.noise_method)
     )
+    source_root = _source_root(args)
     command = [
         sys.executable,
         "-B",
-        str(REPO_ROOT / "avhubert" / "infer_s2s.py"),
+        str(source_root / "avhubert" / "infer_s2s.py"),
         "--config-dir",
-        str(REPO_ROOT / "avhubert" / "conf"),
+        str(source_root / "avhubert" / "conf"),
         "--config-name",
         "s2s_decode.yaml",
         f"dataset.gen_subset={condition.subset}",
@@ -907,7 +948,7 @@ def _decode_command_for_condition(
         f"common_eval.results_path={result_dir}",
         "override.modalities=['audio','video']",
         f"hydra.run.dir={result_dir}",
-        f"common.user_dir={REPO_ROOT / 'chapter3_distill_only'}",
+        f"common.user_dir={source_root / 'chapter3_distill_only'}",
         f"common.seed={protocol.evaluation_seed}",
     ]
     if condition.noise_type is None:
@@ -1035,6 +1076,15 @@ def run_command(
     manifest: ManifestStore,
     experiment: str,
 ) -> Dict[str, Any]:
+    try:
+        source_snapshot = require_manifest_source_snapshot(manifest.read())
+        stage_start_integrity = verify_source_worktree(source_snapshot)
+    except SourceWorktreeError as exc:
+        raise PreflightError(
+            f"refusing to execute {stage} from invalid pinned source: {exc}"
+        ) from exc
+    source_root = Path(source_snapshot["worktree_path"]).resolve()
+
     log_path = run_dir / "logs" / f"{stage}.log"
     log_path.parent.mkdir(parents=True, exist_ok=True)
     started = utc_now()
@@ -1045,6 +1095,12 @@ def run_command(
                 "active_stage": stage,
                 "commands": {stage: list(map(str, command))},
                 "stage_started_at": {stage: started},
+                "stage_provenance": {
+                    stage: {
+                        "status": "running",
+                        "start": stage_start_integrity,
+                    }
+                },
             },
             "artifacts": {"logs": {stage: str(log_path)}},
             "failure": None,
@@ -1052,12 +1108,27 @@ def run_command(
     )
     env = os.environ.copy()
     env.update(wandb_env_for_stage(experiment, stage))
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
+    pinned_pythonpath = [
+        str(source_root),
+        str(source_root / "fairseq"),
+    ]
+    if env.get("PYTHONPATH"):
+        development_root = Path(source_snapshot["repository_root"]).resolve()
+        for raw_path in env["PYTHONPATH"].split(os.pathsep):
+            if not raw_path:
+                continue
+            candidate = Path(raw_path).resolve()
+            if candidate == development_root or development_root in candidate.parents:
+                continue
+            pinned_pythonpath.append(raw_path)
+    env["PYTHONPATH"] = os.pathsep.join(pinned_pythonpath)
     with log_path.open("a", encoding="utf-8") as log:
         log.write(f"\n[{started}] $ {shlex.join(map(str, command))}\n")
         log.flush()
         process = subprocess.Popen(
             list(map(str, command)),
-            cwd=str(REPO_ROOT),
+            cwd=str(source_root),
             stdout=log,
             stderr=subprocess.STDOUT,
             env=env,
@@ -1067,16 +1138,49 @@ def run_command(
         memory = monitor.stop().as_dict()
     duration = time.monotonic() - monotonic_start
     completed = utc_now()
+    try:
+        stage_end_integrity = verify_source_worktree(source_snapshot)
+        integrity_error = None
+    except SourceWorktreeError as exc:
+        stage_end_integrity = {
+            "verified_at": utc_now(),
+            "worktree_path": str(source_root),
+            "error": str(exc),
+            "clean": False,
+        }
+        integrity_error = exc
     values = {
         "runtime": {
             "active_stage": None,
             "stage_completed_at": {stage: completed},
             "duration_seconds": {stage: duration},
             "returncodes": {stage: returncode},
+            "stage_provenance": {
+                stage: {
+                    "status": (
+                        "source_integrity_failed"
+                        if integrity_error is not None
+                        else ("complete" if returncode == 0 else "failed")
+                    ),
+                    "end": stage_end_integrity,
+                }
+            },
         },
         "measurements": {"peak_memory": {stage: memory}},
     }
     manifest.update(values)
+    if integrity_error is not None:
+        manifest.record_failure(
+            stage=stage,
+            message=(
+                "pinned source worktree changed during stage: "
+                f"{integrity_error}"
+            ),
+            returncode=returncode,
+        )
+        raise PreflightError(
+            f"pinned source integrity failed after {stage}: {integrity_error}"
+        ) from integrity_error
     if returncode:
         manifest.record_failure(
             stage=stage,
@@ -1093,6 +1197,7 @@ def _immutable_manifest(
     config_digest: str,
     hydra_overrides: Sequence[str],
     selection_record: Optional[Mapping[str, Any]],
+    source_snapshot: Mapping[str, Any],
 ) -> Dict[str, Any]:
     provenance = build_provenance(
         REPO_ROOT,
@@ -1113,6 +1218,7 @@ def _immutable_manifest(
     noise_prob = float(_get(config, "task.noise_prob", 0.0))
     return {
         "provenance": provenance,
+        "source_snapshot": copy.deepcopy(dict(source_snapshot)),
         "experiment": args.experiment,
         "seed": args.seed,
         "evaluation_seed": protocol.evaluation_seed,
@@ -1124,6 +1230,7 @@ def _immutable_manifest(
         "hydra_overrides": list(hydra_overrides),
         "selection": copy.deepcopy(selection_record),
         "paths": {
+            "source_worktree": str(source_snapshot["worktree_path"]),
             "teacher_checkpoint": str(args.teacher),
             "data": str(args.data),
             "tokenizer": str(args.tokenizer),
@@ -1164,13 +1271,18 @@ def _immutable_manifest(
 def vars_for_manifest(args: argparse.Namespace) -> Dict[str, Any]:
     output = {}
     for key, value in vars(args).items():
-        if key in {"stage", "dry_run", "evaluation_protocol_obj"}:
+        if key in {
+            "stage",
+            "dry_run",
+            "evaluation_protocol_obj",
+            "source_root",
+        }:
             continue
         output[key] = str(value) if isinstance(value, Path) else value
     return output
 
 
-def _ensure_reusable_run(run_dir: Path, config_digest: str, commit: str) -> None:
+def _ensure_reusable_run(run_dir: Path, config_digest: str) -> None:
     if not run_dir.exists() or not any(run_dir.iterdir()):
         return
     store = ManifestStore(run_dir)
@@ -1178,10 +1290,14 @@ def _ensure_reusable_run(run_dir: Path, config_digest: str, commit: str) -> None
         raise PreflightError(f"refusing nonempty unowned run directory: {run_dir}")
     current = store.read()
     immutable = current["immutable"]
-    existing_commit = _get(immutable, "provenance.implementation.commit")
-    if immutable.get("config_digest") != config_digest or existing_commit != commit:
+    try:
+        snapshot = require_manifest_source_snapshot(current)
+        verify_source_worktree(snapshot)
+    except SourceWorktreeError as exc:
+        raise PreflightError(str(exc)) from exc
+    if immutable.get("config_digest") != config_digest:
         raise PreflightError(
-            f"run directory digest/commit mismatch; choose a new output: {run_dir}"
+            f"run directory config digest mismatch; choose a new output: {run_dir}"
         )
 
 
@@ -1325,6 +1441,122 @@ def _expanded_stages(args: argparse.Namespace) -> list[str]:
     return ["encoder", "export", "finetune", "validate"]
 
 
+def _pinned_launcher_command(
+    args: argparse.Namespace,
+    *,
+    stage: str,
+    source_snapshot: Mapping[str, Any],
+) -> list[str]:
+    source_root = Path(source_snapshot["worktree_path"]).resolve()
+    command = [
+        sys.executable,
+        str(source_root / "scripts" / "distill_only" / "launch.py"),
+        "--experiment",
+        args.experiment,
+        "--seed",
+        str(args.seed),
+        "--stage",
+        stage,
+        "--run-dir",
+        str(args.run_dir),
+        "--output-root",
+        str(args.output_root),
+        "--source-worktree-root",
+        str(args.source_worktree_root),
+        "--teacher",
+        str(args.teacher),
+        "--data",
+        str(args.data),
+        "--tokenizer",
+        str(args.tokenizer),
+        "--noise-root",
+        str(args.noise_root),
+        "--evaluation-protocol",
+        str(args.evaluation_protocol),
+        "--evaluation-seed",
+        str(args.evaluation_seed),
+        "--final-selection",
+        str(args.final_selection),
+        "--gpus",
+        str(args.gpus),
+        "--workers",
+        str(args.workers),
+        "--max-tokens",
+        str(args.max_tokens),
+        "--update-freq",
+        str(args.update_freq),
+        "--finetune-update-freq",
+        str(args.finetune_update_freq),
+        "--fairseq-train",
+        str(args.fairseq_train),
+    ]
+    if args.from_selection:
+        command.extend(("--from-selection", str(args.from_selection)))
+    for override in args.override:
+        command.extend(("--override", override))
+    return command
+
+
+def _write_pinned_slurm_scripts(
+    args: argparse.Namespace,
+    manifest: ManifestStore,
+    source_snapshot: Mapping[str, Any],
+) -> Dict[str, str]:
+    source_root = Path(source_snapshot["worktree_path"]).resolve()
+    slurm_dir = args.run_dir / "source" / "slurm"
+    slurm_dir.mkdir(parents=True, exist_ok=True)
+    paths: Dict[str, str] = {}
+    stages = (
+        ["stage1", "stage2", "export", "finetune", "validate"]
+        if args.experiment == "s2_optional_two_stage"
+        else ["encoder", "export", "finetune", "validate"]
+    )
+    pinned_pythonpath = os.pathsep.join(
+        (str(source_root), str(source_root / "fairseq"))
+    )
+    for stage in stages:
+        command = _pinned_launcher_command(
+            args, stage=stage, source_snapshot=source_snapshot
+        )
+        script = render_stage_slurm_script(
+            worktree_path=source_root,
+            command=command,
+            environment={
+                "PYTHONDONTWRITEBYTECODE": "1",
+                "PYTHONPATH": pinned_pythonpath,
+            },
+        )
+        script = script.replace(
+            "#!/usr/bin/env bash\n",
+            "#!/usr/bin/env bash\n"
+            "#SBATCH --time=8-00:00:00\n"
+            "#SBATCH --partition=ifn\n"
+            "#SBATCH --gres=gpu:pro6000b_96gb:1\n"
+            "#SBATCH --cpus-per-task=32\n"
+            "#SBATCH --ntasks-per-node=1\n"
+            "#SBATCH --mem=48gb\n",
+            1,
+        )
+        path = slurm_dir / f"{stage}.slurm"
+        path.write_text(script, encoding="utf-8")
+        path.chmod(0o750)
+        paths[stage] = str(path.resolve())
+    manifest.update(
+        {
+            "artifacts": {
+                "pinned_slurm_scripts": {
+                    stage: {
+                        "path": path,
+                        "sha256": sha256_file(path),
+                    }
+                    for stage, path in paths.items()
+                }
+            }
+        }
+    )
+    return paths
+
+
 def _reuse_selected_alias(
     args: argparse.Namespace,
     selection_record: Mapping[str, Any],
@@ -1333,6 +1565,12 @@ def _reuse_selected_alias(
 
     selected = ManifestStore(selection_record["selected_manifest"])
     manifest = selected.read()
+    try:
+        source_snapshot = require_manifest_source_snapshot(manifest)
+        verify_source_worktree(source_snapshot)
+    except SourceWorktreeError as exc:
+        raise PreflightError(str(exc)) from exc
+    args.source_root = Path(source_snapshot["worktree_path"]).resolve()
     if args.dry_run:
         planned = {
             "dry_run": True,
@@ -1431,11 +1669,51 @@ def _reuse_selected_alias(
 
 
 def execute(args: argparse.Namespace) -> int:
+    manifest = ManifestStore(args.run_dir)
+    existing_manifest = manifest.read() if manifest.exists() else None
+    source_snapshot: Optional[Dict[str, Any]] = None
+    if existing_manifest is not None:
+        try:
+            source_snapshot = require_manifest_source_snapshot(existing_manifest)
+            verify_source_worktree(source_snapshot)
+        except SourceWorktreeError as exc:
+            raise PreflightError(str(exc)) from exc
+        args.source_root = Path(source_snapshot["worktree_path"]).resolve()
+        args.config_path = (
+            args.source_root
+            / "avhubert"
+            / "conf"
+            / "distill_only"
+            / f"{args.experiment}.yaml"
+        )
+        development_root = Path(source_snapshot["repository_root"])
+        development_head_process = subprocess.run(
+            ["git", "-C", str(development_root), "rev-parse", "HEAD"],
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        development_head = (
+            development_head_process.stdout.strip()
+            if development_head_process.returncode == 0
+            else "unavailable"
+        )
+        print(
+            "Resuming experiment from pinned source commit "
+            f"{source_snapshot['commit']}. "
+            f"Current development checkout {development_head} is not used "
+            "by this run.",
+            file=sys.stderr,
+        )
+    else:
+        args.source_root = REPO_ROOT
+
     config = load_composed_config(args.config_path)
     selection_overrides, selection_record = _selection_overrides(
         args.experiment, args.from_selection
     )
-    provenance = preflight(
+    preflight(
         experiment=args.experiment,
         config_path=args.config_path,
         config=config,
@@ -1446,11 +1724,34 @@ def execute(args: argparse.Namespace) -> int:
         output_root=args.output_root,
         run_dir=args.run_dir,
         selection_path=args.from_selection,
+        require_source_clean=existing_manifest is None,
     )
     if args.experiment in ALIAS_EXPERIMENTS:
         if selection_record is None:
             raise PreflightError(f"{args.experiment} requires a selection record")
         return _reuse_selected_alias(args, selection_record)
+
+    if existing_manifest is None and not args.dry_run:
+        try:
+            source_snapshot = create_source_worktree(
+                REPO_ROOT,
+                args.source_worktree_root,
+                run_identifier=f"{args.experiment}-seed-{args.seed}",
+                run_dir=args.run_dir,
+                require_clean=True,
+            )
+        except SourceWorktreeError as exc:
+            raise PreflightError(str(exc)) from exc
+        args.source_root = Path(source_snapshot["worktree_path"]).resolve()
+        args.config_path = (
+            args.source_root
+            / "avhubert"
+            / "conf"
+            / "distill_only"
+            / f"{args.experiment}.yaml"
+        )
+        config = load_composed_config(args.config_path)
+
     effective_overrides = _base_overrides(args, args.run_dir / "encoder")
     effective_overrides.extend(selection_overrides)
     effective_overrides.extend(args.override)
@@ -1471,21 +1772,24 @@ def execute(args: argparse.Namespace) -> int:
         "explicit_overrides": args.override,
     }
     config_digest = sha256_json(digest_value)
-    _ensure_reusable_run(args.run_dir, config_digest, provenance["commit"])
+    _ensure_reusable_run(args.run_dir, config_digest)
     if args.dry_run:
         _dry_run_plan(args, effective_config, selection_overrides, config_digest)
         return 0
+    assert source_snapshot is not None
     hydra_overrides = effective_overrides
-    manifest = ManifestStore(args.run_dir)
-    manifest.create(
-        _immutable_manifest(
-            args,
-            effective_config,
-            config_digest,
-            hydra_overrides,
-            selection_record,
+    if existing_manifest is None:
+        manifest.create(
+            _immutable_manifest(
+                args,
+                effective_config,
+                config_digest,
+                hydra_overrides,
+                selection_record,
+                source_snapshot,
+            )
         )
-    )
+        _write_pinned_slurm_scripts(args, manifest, source_snapshot)
     if args.stage == "prepare":
         print(manifest.path)
         return 0
@@ -1618,29 +1922,76 @@ def execute(args: argparse.Namespace) -> int:
                 continue
             if state != "finetune_complete":
                 raise ManifestError(f"cannot validate from state {state}")
+            source_snapshot = require_manifest_source_snapshot(manifest.read())
+            validation_start = verify_source_worktree(source_snapshot)
+            manifest.update(
+                {
+                    "runtime": {
+                        "stage_provenance": {
+                            "validate": {
+                                "status": "running",
+                                "start": validation_start,
+                            }
+                        }
+                    }
+                }
+            )
             protocol = args.evaluation_protocol_obj
             artifacts = {}
-            for condition, command, output in _decode_commands(
-                args, phase="screening"
-            ):
-                run_command(
-                    command,
-                    stage=f"validate_{condition.name}",
-                    run_dir=args.run_dir,
-                    manifest=manifest,
-                    experiment=args.experiment,
-                )
-                measurement = _wer_measurement(
-                    output, protocol=protocol, condition=condition
-                )
-                artifacts[condition.name] = measurement["artifact"]
+            try:
+                for condition, command, output in _decode_commands(
+                    args, phase="screening"
+                ):
+                    run_command(
+                        command,
+                        stage=f"validate_{condition.name}",
+                        run_dir=args.run_dir,
+                        manifest=manifest,
+                        experiment=args.experiment,
+                    )
+                    measurement = _wer_measurement(
+                        output, protocol=protocol, condition=condition
+                    )
+                    artifacts[condition.name] = measurement["artifact"]
+                    manifest.update(
+                        {
+                            "measurements": {
+                                "wer": {"validation": {condition.name: measurement}}
+                            }
+                        }
+                    )
+                validation_end = verify_source_worktree(source_snapshot)
+            except Exception:
                 manifest.update(
                     {
-                        "measurements": {
-                            "wer": {"validation": {condition.name: measurement}}
+                        "runtime": {
+                            "stage_provenance": {
+                                "validate": {
+                                    "status": "failed",
+                                    "end": {
+                                        "verified_at": utc_now(),
+                                        "worktree_path": source_snapshot[
+                                            "worktree_path"
+                                        ],
+                                    },
+                                }
+                            }
                         }
                     }
                 )
+                raise
+            manifest.update(
+                {
+                    "runtime": {
+                        "stage_provenance": {
+                            "validate": {
+                                "status": "complete",
+                                "end": validation_end,
+                            }
+                        }
+                    }
+                }
+            )
             manifest.transition(
                 "validation_complete",
                 values={"artifacts": {"validation": artifacts}, "failure": None},
@@ -1705,6 +2056,15 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--output-root", type=Path, default=OUTPUT_ROOT)
     parser.add_argument("--run-dir", type=Path)
     parser.add_argument(
+        "--source-worktree-root",
+        type=Path,
+        default=default_source_worktree_root(REPO_ROOT),
+        help=(
+            "Root for detached commit-pinned source worktrees; defaults "
+            "beside the development checkout"
+        ),
+    )
+    parser.add_argument(
         "--evaluation-protocol",
         type=Path,
         default=DEFAULT_EVALUATION_PROTOCOL,
@@ -1733,6 +2093,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     args = parser.parse_args(argv)
     args.config_path = CONFIG_ROOT / f"{args.experiment}.yaml"
     args.output_root = args.output_root.resolve()
+    args.source_worktree_root = args.source_worktree_root.resolve()
     args.run_dir = (
         args.run_dir.resolve()
         if args.run_dir

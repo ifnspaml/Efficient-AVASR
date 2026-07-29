@@ -1,9 +1,103 @@
 # Chapter 3 distillation-only execution
 
 All commands below run from the repository root on
-`feat/ch3-distill-only`. The launcher requires a fully clean worktree and
-verifies the fixed branch ancestor, teacher, LRS3 manifests, tokenizer, and
-MUSAN training manifest by SHA256 before it creates a run.
+`feat/ch3-distill-only`. For a new run, the launcher requires a fully clean
+development checkout and verifies the fixed branch ancestor, teacher, LRS3
+manifests, tokenizer, and MUSAN training manifest by SHA256.
+
+## Fine-tuning encoder/decoder interface
+
+The seq2seq encoder backbone remains frozen for updates 0–47,999 and unfreezes
+at update 48,000. The encoder/decoder interface is handled separately:
+
+- the encoder output dimension is read from
+  `w2v_model.encoder.embedding_dim`;
+- the decoder input dimension is read from `cfg.decoder_embed_dim`;
+- equal dimensions add no parameters;
+- unequal dimensions create
+  `Linear(encoder_output_dim, decoder_input_dim)`;
+- this projection is outside the frozen-backbone `torch.no_grad()` region, so
+  it and the decoder train from update zero;
+- its checkpoint keys remain `encoder.proj.weight` and
+  `encoder.proj.bias`.
+
+The refactor does not put the encoder into evaluation mode. ResNet BatchNorm
+running statistics, dropout, and layerdrop therefore retain the historical
+joint-DP fine-tuning behavior while backbone parameter gradients remain
+disabled during the freeze.
+
+Inspect local exported C2/C3 interfaces without modifying their artifacts:
+
+```bash
+python scripts/distill_only/inspect_seq2seq_interface.py \
+  exp/chapter3_distill_only/c2_t6_historical_heads \
+  exp/chapter3_distill_only/c3a_t12_historical_heads
+```
+
+## Commit-pinned source worktrees
+
+Preparing a new run creates a detached worktree at the clean development
+checkout's exact commit. The default root is derived from the repository
+parent:
+
+```text
+<repo-parent>/<repo-name>_worktrees/chapter3_distill_only/
+```
+
+Override it when necessary:
+
+```bash
+scripts/distill_only/launch.sh \
+  --experiment c2_t6_historical_heads \
+  --stage prepare \
+  --source-worktree-root ../chapter3-source-worktrees
+```
+
+The manifest's immutable `source_snapshot` records the repository root,
+detached-worktree path, commit SHA, tree SHA, integrity digest, and creation
+timestamp. Encoder training, export, profiling, fine-tuning, and decoding use
+that worktree as `cwd`; its repository and vendored Fairseq paths are
+prepended to `PYTHONPATH`. The launcher verifies commit, tree, digest, tracked
+state, staged state, and unexpected untracked files before and after every
+stage.
+
+Inspect the source bound to a run:
+
+```bash
+manifest=exp/chapter3_distill_only/c2_t6_historical_heads/seed_1337/manifest.v1.json
+jq '.immutable.source_snapshot' "$manifest"
+jq '.runtime.stage_provenance' "$manifest"
+```
+
+Development may continue and be committed in the main checkout after
+preparation. Resume from either the main checkout or a generated pinned SLURM
+script; the run continues at the manifest commit:
+
+```bash
+scripts/distill_only/launch.sh \
+  --experiment c2_t6_historical_heads \
+  --stage export
+
+sbatch \
+  exp/chapter3_distill_only/c2_t6_historical_heads/seed_1337/source/slurm/export.slurm
+```
+
+Legacy manifests without `source_snapshot` are readable, but execution stops
+with a compatibility error rather than assigning them to the current HEAD.
+Start a new run unless an explicit, reviewed migration from the recorded
+commit is performed.
+
+Pinned worktrees are intentionally retained for later stages and resumption.
+After a run is complete and no longer needs to resume, inspect it, then remove
+it explicitly from the repository that created it:
+
+```bash
+worktree=$(jq -r '.immutable.source_snapshot.worktree_path' "$manifest")
+git worktree remove "$worktree"
+git worktree prune
+```
+
+Never remove a worktree for an active or resumable experiment.
 
 ## Verification gates
 

@@ -377,13 +377,34 @@ class HubertEncoderWrapper(FairseqEncoder):
         super().__init__(None)
         self.w2v_model = w2v_model
 
-        d = w2v_model.encoder.embedding_dim
-        if getattr(cfg, "decoder_embed_dim", d) != d:
-            self.proj = Linear(d, cfg.decoder_embed_dim)
+        encoder_dim = w2v_model.encoder.embedding_dim
+        decoder_dim = cfg.decoder_embed_dim
+        if encoder_dim != decoder_dim:
+            self.proj = Linear(encoder_dim, decoder_dim)
         else:
             self.proj = None
+        projection_parameters = (
+            sum(parameter.numel() for parameter in self.proj.parameters())
+            if self.proj is not None
+            else 0
+        )
+        projection_description = (
+            f"Linear({encoder_dim}, {decoder_dim})"
+            if self.proj is not None
+            else "None"
+        )
+        logger.info(
+            "Encoder-decoder interface: encoder_dim=%d, decoder_dim=%d, "
+            "projection=%s, parameters=%d",
+            encoder_dim,
+            decoder_dim,
+            projection_description,
+            projection_parameters,
+        )
 
-    def forward(self, source, padding_mask, **kwargs):
+    def extract_backbone(self, source, padding_mask, **kwargs):
+        """Extract encoder features without applying the decoder interface."""
+
         w2v_args = {
             "source": source,
             "padding_mask": padding_mask,
@@ -393,14 +414,28 @@ class HubertEncoderWrapper(FairseqEncoder):
         # B x T x C -> T x B x C
         x = x.transpose(0, 1)
 
-        if self.proj:
-            x = self.proj(x)
-
         return {
             "encoder_out": x,  # T x B x C
             "encoder_padding_mask": padding_mask,  # B x T
             "padding_mask": padding_mask
         }
+
+    def apply_output_projection(self, encoder_out):
+        """Map backbone features to the decoder dimension when required."""
+
+        if self.proj is None:
+            return encoder_out
+        output = dict(encoder_out)
+        output["encoder_out"] = self.proj(encoder_out["encoder_out"])
+        return output
+
+    def forward(self, source, padding_mask, **kwargs):
+        output = self.extract_backbone(
+            source=source,
+            padding_mask=padding_mask,
+            **kwargs,
+        )
+        return self.apply_output_projection(output)
 
     def reorder_encoder_out(self, encoder_out, new_order):
         if encoder_out["encoder_out"] is not None:
@@ -423,6 +458,7 @@ class AVHubertSeq2Seq(FairseqEncoderDecoderModel):
         super().__init__(encoder, decoder)
         self.cfg = cfg
         self.freeze_finetune_updates = cfg.freeze_finetune_updates
+        self.num_updates = 0
 
     @classmethod
     def build_model(cls, cfg, task):
@@ -502,7 +538,8 @@ class AVHubertSeq2Seq(FairseqEncoderDecoderModel):
     def forward(self, **kwargs):
         ft = self.freeze_finetune_updates <= self.num_updates
         with torch.no_grad() if not ft else contextlib.ExitStack():
-            output = self.encoder(**kwargs)
+            output = self.encoder.extract_backbone(**kwargs)
+        output = self.encoder.apply_output_projection(output)
         decoder_out = self.decoder(prev_output_tokens=kwargs['prev_output_tokens'], encoder_out=output)
         return decoder_out
 

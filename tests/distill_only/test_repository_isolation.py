@@ -23,6 +23,7 @@ PROTECTED_PATHS = (
 )
 ALLOWED_NEW_PREFIXES = (
     "chapter3_distill_only/",
+    "avhubert/hubert_asr.py",
     "avhubert/conf/distill_only/",
     "avhubert/noise_utils.py",
     "scripts/distill_only/",
