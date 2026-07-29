@@ -10,9 +10,11 @@ from typing import Any, Dict, Iterable, Iterator, Mapping, Optional, Sequence
 
 from .manifest import (
     MANIFEST_FILENAME,
+    RUN_KIND_EVALUATION,
     ManifestError,
     ManifestStore,
     atomic_write_json,
+    manifest_run_kind,
     read_json,
     sha256_file,
     sha256_json,
@@ -169,9 +171,12 @@ def _validation_snapshot(
     try:
         validation = manifest["measurements"]["wer"]["validation"]
     except (KeyError, TypeError) as exc:
-        raise SelectionError(
-            f"candidate {manifest_path} has no validation WER measurements"
-        ) from exc
+        try:
+            validation = manifest["measurements"]["wer"]["valid"]
+        except (KeyError, TypeError) as nested_exc:
+            raise SelectionError(
+                f"candidate {manifest_path} has no validation WER measurements"
+            ) from nested_exc
     snapshot: Dict[str, Dict[str, Any]] = {}
     for condition in ("clean", "babble_0db"):
         measurement = validation.get(condition)
@@ -549,6 +554,7 @@ def create_selection(
         if manifest["state"] not in (
             "validation_complete",
             "selection_frozen",
+            "evaluation_complete",
         ):
             raise SelectionError(
                 f"candidate {candidate_path} has not completed validation"
@@ -564,6 +570,38 @@ def create_selection(
             }
         )
     selected_manifest = ManifestStore(selected_path).read()
+    selected_finetune = selected_manifest.get("artifacts", {}).get(
+        "finetune_checkpoint"
+    )
+    selected_finetune_manifest = selected_path
+    if manifest_run_kind(selected_manifest) == RUN_KIND_EVALUATION:
+        parent = selected_manifest["immutable"].get("parent_artifact")
+        if not isinstance(parent, Mapping):
+            raise SelectionError(
+                "selected evaluation has no fine-tuning parent artifact"
+            )
+        selected_finetune_manifest = _manifest_path(
+            parent.get("parent_finetune_manifest", "")
+        )
+        selected_finetune = {
+            "path": parent.get("checkpoint_path"),
+            "sha256": parent.get("checkpoint_sha256"),
+        }
+    selected_finetune_identity = None
+    if isinstance(selected_finetune, Mapping):
+        checkpoint = Path(str(selected_finetune.get("path", ""))).resolve()
+        if checkpoint.is_file():
+            checkpoint_hash = sha256_file(checkpoint)
+            recorded_hash = selected_finetune.get("sha256")
+            if recorded_hash and recorded_hash != checkpoint_hash:
+                raise SelectionError(
+                    f"selected fine-tuning checkpoint changed: {checkpoint}"
+                )
+            selected_finetune_identity = {
+                "manifest": str(selected_finetune_manifest),
+                "checkpoint": str(checkpoint),
+                "checkpoint_sha256": checkpoint_hash,
+            }
     if conformer_match_record is not None:
         _verify_conformer_match_binding(
             conformer_match_record,
@@ -590,6 +628,7 @@ def create_selection(
         "candidates": candidate_records,
         "selected_manifest": str(selected_path),
         "selected_immutable_sha256": selected_manifest["immutable_sha256"],
+        "selected_finetune_artifact": selected_finetune_identity,
         "selected_metric_value": next(
             candidate["validation_wer"][metric_condition]["value"]
             for candidate in candidate_records
@@ -647,6 +686,32 @@ def read_selection(path: os.PathLike[str] | str) -> Dict[str, Any]:
     manifest = ManifestStore(selected_manifest).read()
     if manifest["immutable_sha256"] != record.get("selected_immutable_sha256"):
         raise SelectionError("selected manifest has changed since selection was frozen")
+    identity = record.get("selected_finetune_artifact")
+    if identity is not None:
+        if not isinstance(identity, Mapping):
+            raise SelectionError("selected fine-tuning artifact identity is invalid")
+        identity_manifest = _manifest_path(identity.get("manifest", ""))
+        if manifest_run_kind(manifest) == RUN_KIND_EVALUATION:
+            parent = manifest["immutable"].get("parent_artifact", {})
+            expected_identity_manifest = _manifest_path(
+                parent.get("parent_finetune_manifest", "")
+            )
+        else:
+            expected_identity_manifest = selected_manifest
+        if identity_manifest != expected_identity_manifest:
+            raise SelectionError(
+                "selected fine-tuning artifact names another manifest"
+            )
+        checkpoint = Path(str(identity.get("checkpoint", ""))).resolve()
+        expected_hash = str(identity.get("checkpoint_sha256", ""))
+        if (
+            not checkpoint.is_file()
+            or not expected_hash
+            or sha256_file(checkpoint) != expected_hash
+        ):
+            raise SelectionError(
+                "selected fine-tuning checkpoint is missing or changed"
+            )
     if record["kind"] == "c_to_d":
         conformer_match = record.get("conformer_match")
         if not isinstance(conformer_match, Mapping):
@@ -778,6 +843,40 @@ def require_final_selection(
     return record
 
 
+def require_final_selection_artifact(
+    path: os.PathLike[str] | str,
+    *,
+    finetune_manifest: os.PathLike[str] | str,
+    checkpoint_sha256: str,
+) -> Dict[str, Any]:
+    """Authorize test evaluation for one exact fine-tuned artifact."""
+
+    record = read_selection(path)
+    if record["kind"] != "final":
+        raise SelectionError(
+            f"test evaluation requires a final lock, got {record['kind']}"
+        )
+    identity = record.get("selected_finetune_artifact")
+    if not isinstance(identity, Mapping):
+        raise SelectionError(
+            "final selection does not identify a fine-tuning manifest and "
+            "checkpoint hash"
+        )
+    requested_manifest = _manifest_path(finetune_manifest)
+    selected_manifest = _manifest_path(identity.get("manifest", ""))
+    if requested_manifest != selected_manifest:
+        raise SelectionError(
+            f"fine-tuning manifest {requested_manifest} is not selected "
+            f"{selected_manifest}"
+        )
+    selected_hash = str(identity.get("checkpoint_sha256", ""))
+    if not selected_hash or selected_hash != checkpoint_sha256:
+        raise SelectionError(
+            "fine-tuning checkpoint hash does not match the final selection"
+        )
+    return record
+
+
 def freeze_selected_manifest(path: os.PathLike[str] | str) -> Dict[str, Any]:
     """Transition the selected manifest after a final decision is locked."""
 
@@ -785,6 +884,9 @@ def freeze_selected_manifest(path: os.PathLike[str] | str) -> Dict[str, Any]:
     if record["kind"] != "final":
         raise SelectionError("only final selection freezes the run lifecycle")
     store = ManifestStore(record["selected_manifest"])
+    current = store.read()
+    if manifest_run_kind(current) == RUN_KIND_EVALUATION:
+        return current
     return store.transition(
         "selection_frozen",
         values={

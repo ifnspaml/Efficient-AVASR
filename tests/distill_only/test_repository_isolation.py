@@ -22,6 +22,7 @@ PROTECTED_PATHS = (
     "scripts/run_merging.sh",
 )
 ALLOWED_NEW_PREFIXES = (
+    ".gitignore",
     "chapter3_distill_only/",
     "avhubert/hubert_asr.py",
     "avhubert/conf/distill_only/",

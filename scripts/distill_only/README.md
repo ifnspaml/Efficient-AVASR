@@ -99,6 +99,113 @@ git worktree prune
 
 Never remove a worktree for an active or resumable experiment.
 
+## Derived fine-tuning and independent evaluations
+
+The launcher models post-export work as an artifact graph:
+
+```text
+exported student
+    └── derived fine-tuning
+        ├── evaluation
+        ├── evaluation
+        └── evaluation
+```
+
+The historical root run and its manifest are never reset. A legacy root
+without `immutable.source_snapshot` cannot be resumed, but its exported
+student may be verified by SHA256 and used as the immutable parent of a new
+derived fine-tuning run.
+
+Create a derived fine-tuning run and immediately run screening validation:
+
+```bash
+sbatch scripts/distill_only/launch.sh \
+  --experiment c3a_t12_historical_heads \
+  --stage finetune,evaluate \
+  --derive-from original-export \
+  --run-label projection-fix \
+  --evaluation-label itut-screening \
+  --eval-subsets valid
+```
+
+Derived runs are allocated under the root run:
+
+```text
+reruns/<run-label>_<source-commit>_<sequence>/
+```
+
+The derived manifest starts at `exported`, records the parent manifest and
+export hashes, and owns only `finetune_running → finetune_complete`. Its
+source commit is independent of the commit that originally produced the
+export.
+
+Add another evaluation without rerunning fine-tuning:
+
+```bash
+sbatch scripts/distill_only/launch.sh \
+  --experiment c3a_t12_historical_heads \
+  --stage evaluate \
+  --derive-from \
+    exp/chapter3_distill_only/c3a_t12_historical_heads/seed_1337/reruns/projection-fix_e60def1_001 \
+  --evaluation-label itut-full-valid \
+  --evaluation-phase final \
+  --eval-subsets valid
+```
+
+Each evaluation is stored below the fine-tuning run:
+
+```text
+evaluations/<evaluation-label>/manifest.v1.json
+```
+
+It has an independent lifecycle and source snapshot. Creating or resuming an
+evaluation never edits the fine-tuning manifest. A repeated label resumes
+only the same checkpoint, protocol, subsets, conditions, seed, overrides,
+and execution source. A conflicting digest is rejected.
+
+`--evaluation-phase auto` uses screening conditions for `valid` and final
+conditions for requests containing `test`. Use `--evaluation-phase final
+--eval-subsets valid` for the complete final matrix on validation without
+touching test data. Test requests require the final-selection lock before
+any decoding starts:
+
+```bash
+sbatch scripts/distill_only/launch.sh \
+  --experiment c3a_t12_historical_heads \
+  --stage evaluate \
+  --derive-from <explicit-derived-run> \
+  --evaluation-label itut-final-test \
+  --eval-subsets test \
+  --final-selection exp/chapter3_distill_only/selection/final.json
+```
+
+Supported parent selectors are `original-export`, `latest-export`,
+`original-finetune`, `latest-finetune`, an explicit run directory, or an
+explicit `manifest.v1.json`. Omission is allowed only when one compatible
+artifact exists. Ordering comes from manifest lineage and locked sequence
+allocation, never filesystem timestamps. Raw `.pt` paths are rejected.
+Use explicit derived-run paths for thesis results.
+
+Every derived/evaluation manifest records both parent-artifact provenance and
+its own execution commit. Immediate evaluation may share the fine-tuning
+worktree; a later evaluation receives a new pinned worktree so evaluation
+code may advance without changing the model. Resume through the generated
+`source/slurm/resume.slurm`; changing the main checkout does not affect it.
+
+Preview resolution and commands without creating directories, manifests, or
+worktrees:
+
+```bash
+scripts/distill_only/launch.sh \
+  --experiment c3a_t12_historical_heads \
+  --stage finetune,evaluate \
+  --derive-from original-export \
+  --run-label projection-fix \
+  --evaluation-label itut-screening \
+  --eval-subsets valid \
+  --dry-run
+```
+
 ## Verification gates
 
 ```bash

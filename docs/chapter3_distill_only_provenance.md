@@ -26,6 +26,35 @@ The reference establishes the model peak LR `0.002`, Adam betas
 Its composite optimizer and all pruning-specific settings are deliberately not
 copied into distillation-only configs.
 
+### Post-export artifact lineage
+
+Root encoder runs, derived fine-tuning runs, and evaluations have distinct
+manifest roles:
+
+```text
+root_pipeline.exported_student
+    -> derived_finetune.finetune_checkpoint
+        -> evaluation
+```
+
+A legacy root manifest remains attributable to its original implementation
+commit and is never assigned a new source worktree. Its export can be used as
+a parent only after hashing both the historical manifest and `student.pt`.
+The derived fine-tuning manifest separately records the current pinned
+execution commit, tree, worktree, unchanged fine-tuning configuration, and
+resulting checkpoint hash.
+
+Evaluations are independent children of the fine-tuned checkpoint. Each
+evaluation owns a manifest, configuration digest, source snapshot, condition
+progress, WER artifacts, and failure/resume state. Evaluation creation never
+updates the fine-tuning manifest. Consequently, a fixed checkpoint can be
+evaluated under a later source commit without falsely attributing that commit
+to model training.
+
+Lineage aliases use manifest roles and locked derived sequence numbers; they
+never use filesystem modification times. Final test authorization binds both
+the selected fine-tuning manifest and the checkpoint SHA256.
+
 ### Old distillation-only repository
 
 - Path: `/home/zhengyangli/work/distil-av-hubert`

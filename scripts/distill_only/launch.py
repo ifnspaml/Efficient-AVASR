@@ -30,7 +30,26 @@ from chapter3_distill_only.evaluation import (  # noqa: E402
     measurement_metadata,
     validate_protocol_artifacts,
 )
+from chapter3_distill_only.evaluation_runs import (  # noqa: E402
+    evaluation_immutable,
+    execute_evaluation_conditions,
+    parse_eval_subsets,
+    prepare_evaluation_store,
+    resolve_evaluation_phase,
+    selected_conditions,
+)
+from chapter3_distill_only.lineage import (  # noqa: E402
+    ArtifactRef,
+    LineageError,
+    allocate_derived_run,
+    canonical_root_run,
+    evaluation_directory,
+    proposed_derived_run,
+    resolve_artifact,
+    sanitize_label,
+)
 from chapter3_distill_only.manifest import (  # noqa: E402
+    RUN_KIND_DERIVED_FINETUNE,
     ManifestError,
     ManifestStore,
     build_provenance,
@@ -43,11 +62,13 @@ from chapter3_distill_only.selection import (  # noqa: E402
     inherited_hydra_overrides,
     read_selection,
     require_final_selection,
+    require_final_selection_artifact,
 )
 from chapter3_distill_only.source_worktree import (  # noqa: E402
     SourceWorktreeError,
     create_source_worktree,
     default_source_worktree_root,
+    repository_snapshot,
     render_stage_slurm_script,
     require_manifest_source_snapshot,
     verify_source_worktree,
@@ -122,12 +143,33 @@ STAGES = (
     "finetune",
     "validate",
     "test",
+    "evaluate",
     "all",
 )
+COMPOSITE_STAGES = (("finetune", "evaluate"),)
 
 
 class PreflightError(RuntimeError):
     pass
+
+
+def parse_stage_expression(value: str) -> tuple[str, ...]:
+    components = tuple(item.strip() for item in str(value).split(","))
+    if not components or any(not item for item in components):
+        raise argparse.ArgumentTypeError("stage expression has an empty component")
+    if len(set(components)) != len(components):
+        raise argparse.ArgumentTypeError("stage expression contains duplicates")
+    unknown = [item for item in components if item not in STAGES]
+    if unknown:
+        raise argparse.ArgumentTypeError(
+            "unknown stage" + ("s" if len(unknown) > 1 else "") + ": "
+            + ", ".join(unknown)
+        )
+    if len(components) > 1 and components not in COMPOSITE_STAGES:
+        raise argparse.ArgumentTypeError(
+            "the only supported composite stage is finetune,evaluate"
+        )
+    return components
 
 
 def _git(*arguments: str, check: bool = True) -> str:
@@ -878,11 +920,29 @@ def _profile_command(args: argparse.Namespace) -> tuple[list[str], Path]:
     )
 
 
-def _finetune_command(args: argparse.Namespace) -> tuple[list[str], Path]:
-    student = args.run_dir / "export" / "student.pt"
+def _finetune_command(
+    args: argparse.Namespace,
+    *,
+    exported_checkpoint: Optional[Path] = None,
+    output_dir: Optional[Path] = None,
+    source_root: Optional[Path] = None,
+) -> tuple[list[str], Path]:
+    student = (
+        exported_checkpoint.resolve()
+        if exported_checkpoint is not None
+        else args.run_dir / "export" / "student.pt"
+    )
     _require_path(student, "exported student checkpoint", directory=False)
-    output = args.run_dir / "finetune"
-    source_root = _source_root(args)
+    output = (
+        output_dir.resolve()
+        if output_dir is not None
+        else args.run_dir / "finetune"
+    )
+    source_root = (
+        source_root.resolve()
+        if source_root is not None
+        else _source_root(args)
+    )
     command = [
         args.fairseq_train,
         "--config-dir",
@@ -928,13 +988,18 @@ def _decode_command_for_condition(
     condition: EvaluationCondition,
     *,
     checkpoint: Path,
+    evaluation_root: Optional[Path] = None,
+    source_root: Optional[Path] = None,
 ) -> tuple[EvaluationCondition, list[str], Path]:
     result_dir = (
-        args.run_dir
-        / "evaluation"
+        (evaluation_root.resolve() if evaluation_root is not None else args.run_dir / "evaluation")
         / condition.output_relative(protocol_noise_method=protocol.noise_method)
     )
-    source_root = _source_root(args)
+    source_root = (
+        source_root.resolve()
+        if source_root is not None
+        else _source_root(args)
+    )
     command = [
         sys.executable,
         "-B",
@@ -987,20 +1052,35 @@ def _decode_commands(
     phase: str,
     require_checkpoint: bool = True,
     validate_artifacts: bool = True,
+    checkpoint: Optional[Path] = None,
+    evaluation_root: Optional[Path] = None,
+    source_root: Optional[Path] = None,
+    conditions: Optional[Sequence[EvaluationCondition]] = None,
 ) -> list[tuple[EvaluationCondition, list[str], Path]]:
     protocol: EvaluationProtocol = args.evaluation_protocol_obj
-    checkpoint = args.run_dir / "finetune" / "checkpoints" / "checkpoint_best.pt"
+    explicit_checkpoint = checkpoint is not None
+    checkpoint = (
+        checkpoint.resolve()
+        if checkpoint is not None
+        else args.run_dir / "finetune" / "checkpoints" / "checkpoint_best.pt"
+    )
     if require_checkpoint:
         _require_path(checkpoint, "fine-tuning checkpoint", directory=False)
-    elif not checkpoint.exists():
+    elif not checkpoint.exists() and not explicit_checkpoint:
         checkpoint = Path("/nonexistent/finetune/checkpoints/checkpoint_best.pt")
     if validate_artifacts:
         validate_protocol_artifacts(protocol, phases=(phase,))
+    selected = conditions if conditions is not None else protocol.conditions(phase)
     return [
         _decode_command_for_condition(
-            args, protocol, condition, checkpoint=checkpoint
+            args,
+            protocol,
+            condition,
+            checkpoint=checkpoint,
+            evaluation_root=evaluation_root,
+            source_root=source_root,
         )
-        for condition in protocol.conditions(phase)
+        for condition in selected
     ]
 
 
@@ -1434,6 +1514,8 @@ def _dry_run_plan(
 
 
 def _expanded_stages(args: argparse.Namespace) -> list[str]:
+    if tuple(args.stage_sequence) == ("finetune", "evaluate"):
+        return ["finetune", "evaluate"]
     if args.stage != "all":
         return [] if args.stage == "prepare" else [args.stage]
     if args.experiment == "s2_optional_two_stage":
@@ -1448,6 +1530,14 @@ def _pinned_launcher_command(
     source_snapshot: Mapping[str, Any],
 ) -> list[str]:
     source_root = Path(source_snapshot["worktree_path"]).resolve()
+    evaluation_protocol = Path(args.evaluation_protocol).resolve()
+    development_root = Path(source_snapshot["repository_root"]).resolve()
+    try:
+        evaluation_protocol = (
+            source_root / evaluation_protocol.relative_to(development_root)
+        ).resolve()
+    except ValueError:
+        pass
     command = [
         sys.executable,
         str(source_root / "scripts" / "distill_only" / "launch.py"),
@@ -1472,7 +1562,7 @@ def _pinned_launcher_command(
         "--noise-root",
         str(args.noise_root),
         "--evaluation-protocol",
-        str(args.evaluation_protocol),
+        str(evaluation_protocol),
         "--evaluation-seed",
         str(args.evaluation_seed),
         "--final-selection",
@@ -1492,6 +1582,16 @@ def _pinned_launcher_command(
     ]
     if args.from_selection:
         command.extend(("--from-selection", str(args.from_selection)))
+    if getattr(args, "derive_from", None):
+        command.extend(("--derive-from", str(args.derive_from)))
+    if getattr(args, "run_label", None):
+        command.extend(("--run-label", args.run_label))
+    if getattr(args, "evaluation_label", None):
+        command.extend(("--evaluation-label", args.evaluation_label))
+    if getattr(args, "eval_subsets", None):
+        command.extend(("--eval-subsets", args.eval_subsets))
+    if getattr(args, "evaluation_phase", None):
+        command.extend(("--evaluation-phase", args.evaluation_phase))
     for override in args.override:
         command.extend(("--override", override))
     return command
@@ -1668,7 +1768,610 @@ def _reuse_selected_alias(
     return 0
 
 
+def _artifact_request(args: argparse.Namespace) -> bool:
+    return (
+        "evaluate" in args.stage_sequence
+        or bool(args.derive_from)
+        or bool(args.run_label)
+        or (
+            args.run_dir_explicit
+            and ManifestStore(args.run_dir).exists()
+            and ManifestStore(args.run_dir).read()["immutable"].get("run_kind")
+            == RUN_KIND_DERIVED_FINETUNE
+        )
+    )
+
+
+def _pinned_equivalent(path: Path, source_root: Path) -> Path:
+    resolved = path.resolve()
+    try:
+        relative = resolved.relative_to(REPO_ROOT.resolve())
+    except ValueError:
+        return resolved
+    return (source_root / relative).resolve()
+
+
+def _derived_finetune_immutable(
+    args: argparse.Namespace,
+    *,
+    parent: ArtifactRef,
+    source_snapshot: Mapping[str, Any],
+    sequence: int,
+    output_dir: Path,
+    command: Sequence[str],
+) -> Dict[str, Any]:
+    source_root = Path(source_snapshot["worktree_path"]).resolve()
+    config_path = (
+        source_root
+        / "avhubert"
+        / "conf"
+        / "av-finetune"
+        / "base_noise_pt_noise_ft_433h.yaml"
+    )
+    resolved_config = load_composed_config(config_path)
+    return {
+        "run_kind": RUN_KIND_DERIVED_FINETUNE,
+        "experiment": args.experiment,
+        "seed": args.seed,
+        "parent_artifact": parent.parent_record(),
+        "source_snapshot": dict(source_snapshot),
+        "lineage": {
+            "root_run_dir": str(
+                canonical_root_run(args.output_root, args.experiment, args.seed)
+            ),
+            "run_label": args.run_label,
+            "sanitized_run_label": sanitize_label(args.run_label),
+            "sequence": sequence,
+        },
+        "finetuning": {
+            "config_path": str(config_path),
+            "config_sha256": sha256_file(config_path),
+            "resolved_config": resolved_config,
+            "hydra_overrides": list(map(str, command[5:])),
+            "output_dir": str(output_dir),
+        },
+    }
+
+
+def _write_artifact_slurm_script(
+    args: argparse.Namespace,
+    *,
+    manifest: ManifestStore,
+    source_snapshot: Mapping[str, Any],
+    output_dir: Path,
+    stage: str,
+    derive_from: Optional[Path] = None,
+) -> Path:
+    source_root = Path(source_snapshot["worktree_path"]).resolve()
+    command_args = copy.copy(args)
+    if derive_from is not None:
+        command_args.derive_from = str(derive_from.resolve())
+        command_args.run_label = None
+        command_args.run_dir = output_dir
+    command = _pinned_launcher_command(
+        command_args,
+        stage=stage,
+        source_snapshot=source_snapshot,
+    )
+    pinned_pythonpath = os.pathsep.join(
+        (str(source_root), str(source_root / "fairseq"))
+    )
+    script = render_stage_slurm_script(
+        worktree_path=source_root,
+        command=command,
+        environment={
+            "PYTHONDONTWRITEBYTECODE": "1",
+            "PYTHONPATH": pinned_pythonpath,
+        },
+    )
+    script = script.replace(
+        "#!/usr/bin/env bash\n",
+        "#!/usr/bin/env bash\n"
+        "#SBATCH --time=8-00:00:00\n"
+        "#SBATCH --partition=ifn\n"
+        "#SBATCH --gres=gpu:pro6000b_96gb:1\n"
+        "#SBATCH --cpus-per-task=32\n"
+        "#SBATCH --ntasks-per-node=1\n"
+        "#SBATCH --mem=48gb\n",
+        1,
+    )
+    destination = output_dir / "source" / "slurm" / "resume.slurm"
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_text(script, encoding="utf-8")
+    destination.chmod(0o750)
+    manifest.update(
+        {
+            "artifacts": {
+                "pinned_slurm_script": {
+                    "path": str(destination),
+                    "sha256": sha256_file(destination),
+                }
+            }
+        }
+    )
+    return destination
+
+
+def _artifact_preflight(
+    args: argparse.Namespace,
+    *,
+    root_run: Path,
+    require_source_clean: bool,
+) -> None:
+    config = load_composed_config(args.config_path)
+    preflight(
+        experiment=args.experiment,
+        config_path=args.config_path,
+        config=config,
+        teacher=args.teacher,
+        data=args.data,
+        tokenizer=args.tokenizer,
+        noise_root=args.noise_root,
+        output_root=args.output_root,
+        run_dir=root_run,
+        selection_path=args.from_selection,
+        require_source_clean=require_source_clean,
+    )
+
+
+def _require_allowed_source_checkout() -> None:
+    branch = _git("branch", "--show-current")
+    if branch == "dev_li":
+        raise PreflightError("branch dev_li is explicitly forbidden")
+    if branch != BASELINE_BRANCH and not branch.startswith("feat/"):
+        raise PreflightError(
+            f"expected {BASELINE_BRANCH} or a feature branch, found {branch}"
+        )
+    ancestor = subprocess.run(
+        [
+            "git",
+            "-C",
+            str(REPO_ROOT),
+            "merge-base",
+            "--is-ancestor",
+            BASELINE_COMMIT,
+            "HEAD",
+        ],
+        check=False,
+    )
+    if ancestor.returncode:
+        raise PreflightError(
+            f"HEAD does not descend from required baseline {BASELINE_COMMIT}"
+        )
+
+
+def _dry_run_artifact_request(
+    args: argparse.Namespace,
+    *,
+    root_run: Path,
+    parent: ArtifactRef,
+    derived_run: Optional[Path],
+    source: Mapping[str, Any],
+) -> int:
+    source_root = REPO_ROOT
+    plan: Dict[str, Any] = {
+        "dry_run": True,
+        "experiment": args.experiment,
+        "stages": list(args.stage_sequence),
+        "parent_artifact": parent.parent_record(),
+        "source_commit": source["commit"],
+        "source_tree": source["tree"],
+        "source_worktree_root": str(args.source_worktree_root),
+        "creates_files": False,
+    }
+    if "finetune" in args.stage_sequence:
+        assert derived_run is not None
+        command, output = _finetune_command(
+            args,
+            exported_checkpoint=parent.checkpoint_path,
+            output_dir=derived_run / "finetune",
+            source_root=source_root,
+        )
+        plan["derived_run"] = str(derived_run)
+        plan["finetune_command"] = command
+        checkpoint_path = output / "checkpoints" / "checkpoint_best.pt"
+    else:
+        checkpoint_path = parent.checkpoint_path
+    if "evaluate" in args.stage_sequence:
+        phase = args.evaluation_phase_resolved
+        protocol = args.evaluation_protocol_obj
+        conditions = selected_conditions(
+            protocol,
+            phase=phase,
+            subsets=args.eval_subsets_tuple,
+        )
+        finetune_run = derived_run if derived_run is not None else parent.run_dir
+        evaluation_root = evaluation_directory(
+            finetune_run, args.evaluation_label
+        )
+        plan["evaluation"] = {
+            "label": args.evaluation_label,
+            "phase": phase,
+            "subsets": list(args.eval_subsets_tuple),
+            "directory": str(evaluation_root),
+            "selection_required": "test" in args.eval_subsets_tuple,
+            "conditions": [
+                {
+                    "name": condition.name,
+                    "subset": condition.subset,
+                    "command": command,
+                    "output": str(output),
+                }
+                for condition, command, output in _decode_commands(
+                    args,
+                    phase=phase,
+                    require_checkpoint=False,
+                    validate_artifacts=False,
+                    checkpoint=checkpoint_path,
+                    evaluation_root=evaluation_root,
+                    source_root=source_root,
+                    conditions=conditions,
+                )
+            ],
+        }
+    print(json.dumps(plan, indent=2, sort_keys=True))
+    return 0
+
+
+def _execute_derived_finetune(
+    args: argparse.Namespace,
+    *,
+    root_run: Path,
+) -> tuple[ArtifactRef, Mapping[str, Any]]:
+    existing_store = (
+        ManifestStore(args.run_dir)
+        if args.run_dir_explicit and ManifestStore(args.run_dir).exists()
+        else None
+    )
+    if existing_store is not None:
+        existing = existing_store.read()
+        if existing["immutable"].get("run_kind") != RUN_KIND_DERIVED_FINETUNE:
+            raise PreflightError(
+                f"--run-dir is not a derived fine-tuning run: {args.run_dir}"
+            )
+        source_snapshot = require_manifest_source_snapshot(existing)
+        verify_source_worktree(source_snapshot)
+        parent_run = existing["immutable"]["parent_artifact"]["parent_run_dir"]
+        parent = resolve_artifact(
+            root_run, parent_run, artifact_kind="exported_student"
+        )
+        recorded_parent_hash = existing["immutable"]["parent_artifact"][
+            "checkpoint_sha256"
+        ]
+        if parent.checkpoint_sha256 != recorded_parent_hash:
+            raise PreflightError("derived fine-tuning parent checkpoint changed")
+        derived_run = existing_store.path.parent
+        sequence = int(existing["immutable"]["lineage"]["sequence"])
+        args.source_root = Path(source_snapshot["worktree_path"]).resolve()
+        args.config_path = (
+            args.source_root
+            / "avhubert"
+            / "conf"
+            / "distill_only"
+            / f"{args.experiment}.yaml"
+        )
+        _artifact_preflight(
+            args, root_run=root_run, require_source_clean=False
+        )
+    else:
+        if not args.run_label:
+            raise PreflightError("derived fine-tuning requires --run-label")
+        parent = resolve_artifact(
+            root_run, args.derive_from, artifact_kind="exported_student"
+        )
+        source = repository_snapshot(REPO_ROOT, require_clean=True)
+        proposed, sequence = proposed_derived_run(
+            root_run,
+            run_label=args.run_label,
+            commit=source["commit"],
+        )
+        if args.dry_run:
+            _artifact_preflight(
+                args, root_run=root_run, require_source_clean=True
+            )
+            return parent, {
+                "dry_run": True,
+                "source": source,
+                "derived_run": proposed,
+            }
+        _artifact_preflight(args, root_run=root_run, require_source_clean=True)
+        derived_run, sequence = allocate_derived_run(
+            root_run,
+            run_label=args.run_label,
+            commit=source["commit"],
+        )
+        try:
+            source_snapshot = create_source_worktree(
+                REPO_ROOT,
+                args.source_worktree_root,
+                run_identifier=derived_run.name,
+                run_dir=derived_run,
+                require_clean=True,
+            )
+        except SourceWorktreeError as exc:
+            raise PreflightError(str(exc)) from exc
+        args.source_root = Path(source_snapshot["worktree_path"]).resolve()
+        args.run_dir = derived_run
+        command, output = _finetune_command(
+            args,
+            exported_checkpoint=parent.checkpoint_path,
+            output_dir=derived_run / "finetune",
+            source_root=args.source_root,
+        )
+        store = ManifestStore(derived_run)
+        store.create(
+            _derived_finetune_immutable(
+                args,
+                parent=parent,
+                source_snapshot=source_snapshot,
+                sequence=sequence,
+                output_dir=output,
+                command=command,
+            )
+        )
+        _write_artifact_slurm_script(
+            args,
+            manifest=store,
+            source_snapshot=source_snapshot,
+            output_dir=derived_run,
+            stage=args.stage,
+        )
+        existing_store = store
+    assert existing_store is not None
+    args.run_dir = existing_store.path.parent
+    current = existing_store.read()
+    if current["state"] == "exported":
+        existing_store.transition("finetune_running")
+    elif current["state"] == "finetune_complete":
+        return (
+            resolve_artifact(
+                root_run,
+                str(args.run_dir),
+                artifact_kind="finetune_checkpoint",
+            ),
+            source_snapshot,
+        )
+    elif current["state"] != "finetune_running":
+        raise PreflightError(
+            f"cannot resume derived fine-tuning from {current['state']}"
+        )
+    command, output = _finetune_command(
+        args,
+        exported_checkpoint=parent.checkpoint_path,
+        output_dir=args.run_dir / "finetune",
+        source_root=args.source_root,
+    )
+    run_command(
+        command,
+        stage="finetune",
+        run_dir=args.run_dir,
+        manifest=existing_store,
+        experiment=args.experiment,
+    )
+    _record_actual_hydra_config(
+        existing_store,
+        stage="finetune",
+        run_directory=output,
+    )
+    checkpoint = output / "checkpoints" / "checkpoint_best.pt"
+    _require_path(checkpoint, "fine-tuning checkpoint", directory=False)
+    existing_store.transition(
+        "finetune_complete",
+        values={
+            "artifacts": {
+                "finetune_checkpoint": {
+                    "path": str(checkpoint.resolve()),
+                    "sha256": sha256_file(checkpoint),
+                }
+            },
+            "failure": None,
+        },
+    )
+    return (
+        resolve_artifact(
+            root_run,
+            str(args.run_dir),
+            artifact_kind="finetune_checkpoint",
+        ),
+        source_snapshot,
+    )
+
+
+def _execute_evaluation(
+    args: argparse.Namespace,
+    *,
+    root_run: Path,
+    parent: ArtifactRef,
+    immediate_snapshot: Optional[Mapping[str, Any]] = None,
+) -> ManifestStore:
+    phase = args.evaluation_phase_resolved
+    subsets = args.eval_subsets_tuple
+    if "test" in subsets:
+        require_final_selection_artifact(
+            args.final_selection,
+            finetune_manifest=parent.manifest_path,
+            checkpoint_sha256=parent.checkpoint_sha256,
+        )
+    protocol_path = args.evaluation_protocol
+    evaluation_dir = evaluation_directory(
+        parent.run_dir, args.evaluation_label
+    )
+    existing_store = ManifestStore(evaluation_dir)
+    existing = existing_store.read() if existing_store.exists() else None
+    if existing is not None and existing["state"] != "evaluation_complete":
+        source_snapshot = require_manifest_source_snapshot(existing)
+        verify_source_worktree(source_snapshot)
+    elif immediate_snapshot is not None and existing is None:
+        source_snapshot = dict(immediate_snapshot)
+    else:
+        _require_allowed_source_checkout()
+        current_source = repository_snapshot(REPO_ROOT, require_clean=True)
+        if existing is not None:
+            recorded = require_manifest_source_snapshot(existing)
+            if current_source["commit"] == recorded["commit"]:
+                source_snapshot = recorded
+            else:
+                source_snapshot = {
+                    **current_source,
+                    "schema_version": recorded["schema_version"],
+                    "repository_root": str(REPO_ROOT.resolve()),
+                    "worktree_root": str(args.source_worktree_root),
+                    "worktree_path": str(REPO_ROOT.resolve()),
+                    "created_at": utc_now(),
+                }
+        elif args.dry_run:
+            source_snapshot = current_source
+        else:
+            try:
+                source_snapshot = create_source_worktree(
+                    REPO_ROOT,
+                    args.source_worktree_root,
+                    run_identifier=(
+                        f"{parent.run_dir.name}-eval-"
+                        f"{sanitize_label(args.evaluation_label)}"
+                    ),
+                    run_dir=evaluation_dir,
+                    require_clean=True,
+                )
+            except SourceWorktreeError as exc:
+                raise PreflightError(str(exc)) from exc
+    source_root = Path(
+        source_snapshot.get("worktree_path", REPO_ROOT)
+    ).resolve()
+    pinned_protocol_path = _pinned_equivalent(protocol_path, source_root)
+    protocol = load_evaluation_protocol(pinned_protocol_path)
+    if args.evaluation_seed != protocol.evaluation_seed:
+        protocol = EvaluationProtocol(
+            path=protocol.path,
+            schema_version=protocol.schema_version,
+            noise_method=protocol.noise_method,
+            evaluation_seed=args.evaluation_seed,
+            speech_level_dbov=protocol.speech_level_dbov,
+            noise_roots=protocol.noise_roots,
+            screening=protocol.screening,
+            final=protocol.final,
+            raw=protocol.raw,
+        )
+    conditions = selected_conditions(
+        protocol, phase=phase, subsets=subsets
+    )
+    immutable = evaluation_immutable(
+        experiment=args.experiment,
+        seed=args.seed,
+        label=args.evaluation_label,
+        parent=parent,
+        protocol=protocol,
+        phase=phase,
+        subsets=subsets,
+        conditions=conditions,
+        evaluation_seed=args.evaluation_seed,
+        source_snapshot=source_snapshot,
+    )
+    if args.dry_run:
+        return existing_store
+    store, created = prepare_evaluation_store(
+        parent.run_dir,
+        label=args.evaluation_label,
+        immutable=immutable,
+        allow_existing_source=True,
+    )
+    if created:
+        _write_artifact_slurm_script(
+            args,
+            manifest=store,
+            source_snapshot=source_snapshot,
+            output_dir=evaluation_dir,
+            stage="evaluate",
+            derive_from=parent.run_dir,
+        )
+    if store.read()["state"] == "evaluation_complete":
+        return store
+    validate_protocol_artifacts(
+        protocol, phases=(phase,), conditions=conditions
+    )
+    commands = _decode_commands(
+        args,
+        phase=phase,
+        checkpoint=parent.checkpoint_path,
+        evaluation_root=evaluation_dir / "results",
+        source_root=source_root,
+        conditions=conditions,
+    )
+    def run_condition(
+        condition: EvaluationCondition,
+        command: Sequence[str],
+        output: Path,
+    ) -> None:
+        del output
+        run_command(
+            command,
+            stage=f"evaluate_{condition.subset}_{condition.name}",
+            run_dir=evaluation_dir,
+            manifest=store,
+            experiment=args.experiment,
+        )
+
+    execute_evaluation_conditions(
+        store=store,
+        commands=commands,
+        run_condition=run_condition,
+        measure_condition=lambda condition, output: _wer_measurement(
+            output,
+            protocol=protocol,
+            condition=condition,
+        )
+    )
+    return store
+
+
+def execute_artifact_request(args: argparse.Namespace) -> int:
+    root_run = canonical_root_run(
+        args.output_root, args.experiment, args.seed
+    )
+    parent: ArtifactRef
+    immediate_snapshot: Optional[Mapping[str, Any]] = None
+    if "finetune" in args.stage_sequence:
+        parent, metadata = _execute_derived_finetune(args, root_run=root_run)
+        if metadata.get("dry_run"):
+            return _dry_run_artifact_request(
+                args,
+                root_run=root_run,
+                parent=parent,
+                derived_run=metadata["derived_run"],
+                source=metadata["source"],
+            )
+        immediate_snapshot = metadata
+    else:
+        parent = resolve_artifact(
+            root_run,
+            args.derive_from,
+            artifact_kind="finetune_checkpoint",
+        )
+        if args.dry_run:
+            source = repository_snapshot(REPO_ROOT, require_clean=True)
+            return _dry_run_artifact_request(
+                args,
+                root_run=root_run,
+                parent=parent,
+                derived_run=None,
+                source=source,
+            )
+    if "evaluate" in args.stage_sequence:
+        store = _execute_evaluation(
+            args,
+            root_run=root_run,
+            parent=parent,
+            immediate_snapshot=immediate_snapshot,
+        )
+        print(store.path)
+    else:
+        print(parent.manifest_path)
+    return 0
+
+
 def execute(args: argparse.Namespace) -> int:
+    if _artifact_request(args):
+        return execute_artifact_request(args)
     manifest = ManifestStore(args.run_dir)
     existing_manifest = manifest.read() if manifest.exists() else None
     source_snapshot: Optional[Dict[str, Any]] = None
@@ -2045,8 +2748,21 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--experiment", required=True, choices=available)
     parser.add_argument("--seed", type=int, default=1337)
-    parser.add_argument("--stage", choices=STAGES, default="prepare")
+    parser.add_argument(
+        "--stage",
+        type=parse_stage_expression,
+        default=parse_stage_expression("prepare"),
+    )
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--derive-from")
+    parser.add_argument("--run-label")
+    parser.add_argument("--evaluation-label")
+    parser.add_argument("--eval-subsets")
+    parser.add_argument(
+        "--evaluation-phase",
+        choices=("auto", "screening", "final"),
+        default="auto",
+    )
     parser.add_argument("--from-selection", type=Path)
     parser.add_argument("--override", action="append", default=[])
     parser.add_argument("--teacher", type=Path, default=DEFAULT_TEACHER)
@@ -2091,9 +2807,12 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--finetune-update-freq", type=int, default=8)
     parser.add_argument("--fairseq-train", default="fairseq-hydra-train")
     args = parser.parse_args(argv)
+    args.stage_sequence = tuple(args.stage)
+    args.stage = ",".join(args.stage_sequence)
     args.config_path = CONFIG_ROOT / f"{args.experiment}.yaml"
     args.output_root = args.output_root.resolve()
     args.source_worktree_root = args.source_worktree_root.resolve()
+    args.run_dir_explicit = args.run_dir is not None
     args.run_dir = (
         args.run_dir.resolve()
         if args.run_dir
@@ -2124,9 +2843,50 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     else:
         args.evaluation_seed = protocol.evaluation_seed
     args.evaluation_protocol_obj = protocol
+    contains_evaluate = "evaluate" in args.stage_sequence
+    contains_finetune = "finetune" in args.stage_sequence
+    if contains_evaluate:
+        if not args.evaluation_label:
+            parser.error("--stage evaluate requires --evaluation-label")
+        if not args.eval_subsets:
+            parser.error("--stage evaluate requires --eval-subsets")
+        try:
+            args.eval_subsets_tuple = parse_eval_subsets(args.eval_subsets)
+            args.evaluation_phase_resolved = resolve_evaluation_phase(
+                args.evaluation_phase, args.eval_subsets_tuple
+            )
+        except LineageError as exc:
+            parser.error(str(exc))
+        if (
+            contains_finetune
+            and "test" in args.eval_subsets_tuple
+        ):
+            parser.error(
+                "finetune,evaluate supports validation only; run final test "
+                "as a standalone evaluation after selection"
+            )
+    else:
+        args.eval_subsets_tuple = ()
+        args.evaluation_phase_resolved = None
+        if args.evaluation_label or args.eval_subsets:
+            parser.error(
+                "--evaluation-label/--eval-subsets require --stage evaluate"
+            )
+    if contains_finetune and args.derive_from and not args.run_label and not args.run_dir_explicit:
+        parser.error("derived fine-tuning requires --run-label")
+    if tuple(args.stage_sequence) == ("finetune", "evaluate") and not (
+        args.run_label or args.run_dir_explicit
+    ):
+        parser.error("finetune,evaluate requires --run-label")
+    if args.run_label and not contains_finetune:
+        parser.error("--run-label requires --stage finetune")
+    if args.derive_from and not (contains_finetune or contains_evaluate):
+        parser.error("--derive-from requires finetune or evaluate")
     if args.gpus != 1:
         parser.error("the controlled protocol requires exactly one GPU")
-    if args.stage in ("stage1", "stage2") and args.experiment != "s2_optional_two_stage":
+    if any(
+        stage in ("stage1", "stage2") for stage in args.stage_sequence
+    ) and args.experiment != "s2_optional_two_stage":
         parser.error("--stage stage1/stage2 is only valid for s2_optional_two_stage")
     if (
         args.max_tokens <= 0

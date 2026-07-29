@@ -33,7 +33,43 @@ LIFECYCLE = (
     "selection_frozen",
     "test_complete",
 )
-_NEXT_STATE = {current: following for current, following in zip(LIFECYCLE, LIFECYCLE[1:])}
+RUN_KIND_ROOT = "root_pipeline"
+RUN_KIND_DERIVED_FINETUNE = "derived_finetune"
+RUN_KIND_EVALUATION = "evaluation"
+RUN_KINDS = (
+    RUN_KIND_ROOT,
+    RUN_KIND_DERIVED_FINETUNE,
+    RUN_KIND_EVALUATION,
+)
+RUN_KIND_LIFECYCLES = {
+    RUN_KIND_ROOT: LIFECYCLE,
+    RUN_KIND_DERIVED_FINETUNE: (
+        "exported",
+        "finetune_running",
+        "finetune_complete",
+    ),
+    RUN_KIND_EVALUATION: (
+        "prepared",
+        "evaluation_running",
+        "evaluation_complete",
+    ),
+}
+
+
+def manifest_run_kind(manifest: Mapping[str, Any]) -> str:
+    """Return the immutable run kind, treating old manifests as root runs."""
+
+    immutable = manifest.get("immutable")
+    if not isinstance(immutable, Mapping):
+        return RUN_KIND_ROOT
+    return str(immutable.get("run_kind", RUN_KIND_ROOT))
+
+
+def lifecycle_for_kind(run_kind: str) -> tuple[str, ...]:
+    try:
+        return RUN_KIND_LIFECYCLES[run_kind]
+    except KeyError as exc:
+        raise ManifestError(f"invalid manifest run kind {run_kind!r}") from exc
 
 
 class ManifestError(RuntimeError):
@@ -244,10 +280,14 @@ class ManifestStore:
             raise ManifestError(
                 f"unsupported manifest schema {manifest.get('schema_version')!r}"
             )
-        if manifest.get("state") not in LIFECYCLE:
-            raise ManifestError(f"invalid lifecycle state {manifest.get('state')!r}")
         if not isinstance(manifest.get("immutable"), Mapping):
             raise ManifestError("manifest immutable section must be an object")
+        run_kind = manifest_run_kind(manifest)
+        lifecycle = lifecycle_for_kind(run_kind)
+        if manifest.get("state") not in lifecycle:
+            raise ManifestError(
+                f"invalid {run_kind} lifecycle state {manifest.get('state')!r}"
+            )
         expected_digest = sha256_json(manifest["immutable"])
         if manifest.get("immutable_sha256") != expected_digest:
             raise ManifestError("manifest immutable section digest mismatch")
@@ -257,14 +297,22 @@ class ManifestStore:
         immutable: Mapping[str, Any],
         *,
         runtime: Optional[Mapping[str, Any]] = None,
+        initial_state: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """Create a prepared manifest, or return an identical existing one."""
+        """Create a manifest at its first state, or return an identical one."""
 
         immutable_copy = copy.deepcopy(dict(immutable))
+        run_kind = str(immutable_copy.get("run_kind", RUN_KIND_ROOT))
+        lifecycle = lifecycle_for_kind(run_kind)
+        state = initial_state or lifecycle[0]
+        if state != lifecycle[0]:
+            raise ManifestError(
+                f"{run_kind} manifests must start at {lifecycle[0]!r}, got {state!r}"
+            )
         now = utc_now()
         value: Dict[str, Any] = {
             "schema_version": SCHEMA_VERSION,
-            "state": "prepared",
+            "state": state,
             "created_at": now,
             "updated_at": now,
             "immutable": immutable_copy,
@@ -273,7 +321,7 @@ class ManifestStore:
             "measurements": {},
             "artifacts": {},
             "failure": None,
-            "history": [{"state": "prepared", "timestamp": now}],
+            "history": [{"state": state, "timestamp": now}],
         }
         with self._lock():
             if self.path.exists():
@@ -321,12 +369,20 @@ class ManifestStore:
         scripts safe to retry without skipping a stage.
         """
 
-        if new_state not in LIFECYCLE:
-            raise ManifestError(f"invalid lifecycle state {new_state!r}")
         with self._lock():
             current = self.read()
+            run_kind = manifest_run_kind(current)
+            lifecycle = lifecycle_for_kind(run_kind)
+            if new_state not in lifecycle:
+                raise ManifestError(
+                    f"invalid {run_kind} lifecycle state {new_state!r}"
+                )
+            next_state = {
+                before: after
+                for before, after in zip(lifecycle, lifecycle[1:])
+            }
             old_state = current["state"]
-            if old_state != new_state and _NEXT_STATE.get(old_state) != new_state:
+            if old_state != new_state and next_state.get(old_state) != new_state:
                 raise ManifestError(
                     f"invalid lifecycle transition {old_state!r} -> {new_state!r}"
                 )

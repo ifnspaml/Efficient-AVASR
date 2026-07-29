@@ -455,7 +455,10 @@ def noise_manifest_hashes(protocol: EvaluationProtocol) -> Dict[str, str]:
 
 
 def validate_protocol_artifacts(
-    protocol: EvaluationProtocol, *, phases: Sequence[str]
+    protocol: EvaluationProtocol,
+    *,
+    phases: Sequence[str],
+    conditions: Optional[Sequence[EvaluationCondition]] = None,
 ) -> None:
     """Fail before decoding when noise manifests or ITU-T support are missing."""
 
@@ -463,7 +466,18 @@ def validate_protocol_artifacts(
 
     require_noise_method_available(protocol.noise_method)
     missing = []
-    for path in required_noise_manifests(protocol, phases=phases).values():
+    required = (
+        {
+            str(
+                condition.noise_root / f"{condition.subset}.tsv"
+            ): condition.noise_root / f"{condition.subset}.tsv"
+            for condition in conditions
+            if condition.noise_root is not None
+        }
+        if conditions is not None
+        else required_noise_manifests(protocol, phases=phases)
+    )
+    for path in required.values():
         try:
             exists = path.is_file()
         except OSError as exc:
