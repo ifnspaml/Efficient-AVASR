@@ -68,6 +68,7 @@ from chapter3_distill_only.source_worktree import (  # noqa: E402
     SourceWorktreeError,
     create_source_worktree,
     default_source_worktree_root,
+    prepare_fairseq_runtime,
     repository_snapshot,
     render_stage_slurm_script,
     require_manifest_source_snapshot,
@@ -151,6 +152,37 @@ COMPOSITE_STAGES = (("finetune", "evaluate"),)
 
 class PreflightError(RuntimeError):
     pass
+
+
+def _prepare_pinned_runtime(
+    source_snapshot: Mapping[str, Any],
+    run_dir: Path,
+) -> Dict[str, Any]:
+    try:
+        return prepare_fairseq_runtime(
+            source_snapshot,
+            Path(sys.executable),
+            runtime_root=run_dir.resolve()
+            / "source"
+            / "runtime"
+            / "fairseq",
+            build_if_missing=True,
+        )
+    except SourceWorktreeError as exc:
+        raise PreflightError(
+            "pinned Fairseq runtime preparation failed before stage launch: "
+            f"{exc}"
+        ) from exc
+
+
+def _snapshot_pythonpath(source_snapshot: Mapping[str, Any]) -> str:
+    source_root = Path(str(source_snapshot["worktree_path"])).resolve()
+    paths = []
+    runtime = source_snapshot.get("runtime_artifacts")
+    if isinstance(runtime, Mapping) and runtime.get("pythonpath_root"):
+        paths.append(str(Path(str(runtime["pythonpath_root"])).resolve()))
+    paths.extend((str(source_root), str(source_root / "fairseq")))
+    return os.pathsep.join(paths)
 
 
 def parse_stage_expression(value: str) -> tuple[str, ...]:
@@ -1155,11 +1187,16 @@ def run_command(
     run_dir: Path,
     manifest: ManifestStore,
     experiment: str,
+    prepare_runtime: bool = True,
 ) -> Dict[str, Any]:
     try:
         source_snapshot = require_manifest_source_snapshot(manifest.read())
+        if prepare_runtime:
+            source_snapshot = _prepare_pinned_runtime(
+                source_snapshot, run_dir
+            )
         stage_start_integrity = verify_source_worktree(source_snapshot)
-    except SourceWorktreeError as exc:
+    except (PreflightError, SourceWorktreeError) as exc:
         raise PreflightError(
             f"refusing to execute {stage} from invalid pinned source: {exc}"
         ) from exc
@@ -1189,10 +1226,7 @@ def run_command(
     env = os.environ.copy()
     env.update(wandb_env_for_stage(experiment, stage))
     env["PYTHONDONTWRITEBYTECODE"] = "1"
-    pinned_pythonpath = [
-        str(source_root),
-        str(source_root / "fairseq"),
-    ]
+    pinned_pythonpath = _snapshot_pythonpath(source_snapshot).split(os.pathsep)
     if env.get("PYTHONPATH"):
         development_root = Path(source_snapshot["repository_root"]).resolve()
         for raw_path in env["PYTHONPATH"].split(os.pathsep):
@@ -1611,9 +1645,7 @@ def _write_pinned_slurm_scripts(
         if args.experiment == "s2_optional_two_stage"
         else ["encoder", "export", "finetune", "validate"]
     )
-    pinned_pythonpath = os.pathsep.join(
-        (str(source_root), str(source_root / "fairseq"))
-    )
+    pinned_pythonpath = _snapshot_pythonpath(source_snapshot)
     for stage in stages:
         command = _pinned_launcher_command(
             args, stage=stage, source_snapshot=source_snapshot
@@ -1667,7 +1699,9 @@ def _reuse_selected_alias(
     manifest = selected.read()
     try:
         source_snapshot = require_manifest_source_snapshot(manifest)
-        verify_source_worktree(source_snapshot)
+        source_snapshot = _prepare_pinned_runtime(
+            source_snapshot, selected.path.parent
+        )
     except SourceWorktreeError as exc:
         raise PreflightError(str(exc)) from exc
     args.source_root = Path(source_snapshot["worktree_path"]).resolve()
@@ -1853,9 +1887,7 @@ def _write_artifact_slurm_script(
         stage=stage,
         source_snapshot=source_snapshot,
     )
-    pinned_pythonpath = os.pathsep.join(
-        (str(source_root), str(source_root / "fairseq"))
-    )
+    pinned_pythonpath = _snapshot_pythonpath(source_snapshot)
     script = render_stage_slurm_script(
         worktree_path=source_root,
         command=command,
@@ -2029,8 +2061,9 @@ def _execute_derived_finetune(
             raise PreflightError(
                 f"--run-dir is not a derived fine-tuning run: {args.run_dir}"
             )
-        source_snapshot = require_manifest_source_snapshot(existing)
-        verify_source_worktree(source_snapshot)
+        source_snapshot = _prepare_pinned_runtime(
+            require_manifest_source_snapshot(existing), args.run_dir
+        )
         parent_run = existing["immutable"]["parent_artifact"]["parent_run_dir"]
         parent = resolve_artifact(
             root_run, parent_run, artifact_kind="exported_student"
@@ -2087,6 +2120,9 @@ def _execute_derived_finetune(
                 run_identifier=derived_run.name,
                 run_dir=derived_run,
                 require_clean=True,
+            )
+            source_snapshot = _prepare_pinned_runtime(
+                source_snapshot, derived_run
             )
         except SourceWorktreeError as exc:
             raise PreflightError(str(exc)) from exc
@@ -2199,8 +2235,9 @@ def _execute_evaluation(
     existing_store = ManifestStore(evaluation_dir)
     existing = existing_store.read() if existing_store.exists() else None
     if existing is not None and existing["state"] != "evaluation_complete":
-        source_snapshot = require_manifest_source_snapshot(existing)
-        verify_source_worktree(source_snapshot)
+        source_snapshot = _prepare_pinned_runtime(
+            require_manifest_source_snapshot(existing), evaluation_dir
+        )
     elif immediate_snapshot is not None and existing is None:
         source_snapshot = dict(immediate_snapshot)
     else:
@@ -2232,6 +2269,9 @@ def _execute_evaluation(
                     ),
                     run_dir=evaluation_dir,
                     require_clean=True,
+                )
+                source_snapshot = _prepare_pinned_runtime(
+                    source_snapshot, evaluation_dir
                 )
             except SourceWorktreeError as exc:
                 raise PreflightError(str(exc)) from exc
@@ -2377,8 +2417,10 @@ def execute(args: argparse.Namespace) -> int:
     source_snapshot: Optional[Dict[str, Any]] = None
     if existing_manifest is not None:
         try:
-            source_snapshot = require_manifest_source_snapshot(existing_manifest)
-            verify_source_worktree(source_snapshot)
+            source_snapshot = _prepare_pinned_runtime(
+                require_manifest_source_snapshot(existing_manifest),
+                args.run_dir,
+            )
         except SourceWorktreeError as exc:
             raise PreflightError(str(exc)) from exc
         args.source_root = Path(source_snapshot["worktree_path"]).resolve()
@@ -2442,6 +2484,9 @@ def execute(args: argparse.Namespace) -> int:
                 run_identifier=f"{args.experiment}-seed-{args.seed}",
                 run_dir=args.run_dir,
                 require_clean=True,
+            )
+            source_snapshot = _prepare_pinned_runtime(
+                source_snapshot, args.run_dir
             )
         except SourceWorktreeError as exc:
             raise PreflightError(str(exc)) from exc

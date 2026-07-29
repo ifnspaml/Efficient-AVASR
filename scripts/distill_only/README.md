@@ -61,11 +61,60 @@ prepended to `PYTHONPATH`. The launcher verifies commit, tree, digest, tracked
 state, staged state, and unexpected untracked files before and after every
 stage.
 
+Vendored Fairseq requires two compiled Cython batching modules. These `.so`
+files are intentionally Git-ignored and therefore are not populated by
+`git worktree add`, even when the development checkout was compiled already.
+Before creating a new manifest, the launcher now probes the pinned worktree
+with the launcher's Python interpreter and, when necessary, compiles only the
+two required modules into a writable, run-owned runtime overlay:
+
+```text
+<run>/source/runtime/fairseq/
+```
+
+The immutable source snapshot records the interpreter, Python version,
+`SOABI`, platform, build command, module paths, sizes, and SHA256 hashes under
+`runtime_artifacts`. Stage integrity checks validate those hashes separately
+from the Git commit/tree checks. A missing, changed, wrong-ABI, or
+wrong-interpreter extension fails before training or decoding starts. A
+recorded `sitecustomize.py` supplies an import finder for only those two
+extension module names; all Python source continues to come from the detached
+worktree.
+
+Runs created before runtime recording was added can be prepared without
+rewriting their manifest:
+
+```bash
+python scripts/distill_only/prepare_source_runtime.py \
+  --run-dir exp/chapter3_distill_only/EXPERIMENT/seed_1337/reruns/RUN \
+  --python /path/to/the/training/environment/bin/python
+
+sbatch scripts/distill_only/launch.sh \
+  --experiment EXPERIMENT \
+  --stage finetune,evaluate \
+  --run-dir exp/chapter3_distill_only/EXPERIMENT/seed_1337/reruns/RUN \
+  --derive-from original-export \
+  --run-label LABEL \
+  --evaluation-label itut-screening \
+  --eval-subsets valid
+```
+
+The repair command compiles from the run's recorded pinned sources into its
+writable runtime overlay and writes an audit record to
+`source/runtime/fairseq_runtime.v1.json`. It verifies that the historical
+manifest remains byte-for-byte unchanged. Use `--check-only` to verify an
+already prepared runtime without compiling or writing. A pre-fix run's old
+generated resume script predates overlay support, so resume it once through
+the current committed launcher with its explicit `--run-dir`, as above.
+Runs created after this fix include the overlay path in their generated
+pinned resume scripts automatically.
+
 Inspect the source bound to a run:
 
 ```bash
 manifest=exp/chapter3_distill_only/c2_t6_historical_heads/seed_1337/manifest.v1.json
 jq '.immutable.source_snapshot' "$manifest"
+jq '.immutable.source_snapshot.runtime_artifacts' "$manifest"
 jq '.runtime.stage_provenance' "$manifest"
 ```
 

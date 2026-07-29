@@ -180,6 +180,7 @@ class SourceWorktreeTest(unittest.TestCase):
             run_dir=self.run_dir,
             manifest=store,
             experiment="test",
+            prepare_runtime=False,
         )
         observed = json.loads(observed_cwd.read_text(encoding="utf-8"))
         self.assertEqual(
@@ -214,6 +215,7 @@ class SourceWorktreeTest(unittest.TestCase):
                 run_dir=self.run_dir,
                 manifest=store,
                 experiment="test",
+                prepare_runtime=False,
             )
         stage = store.read()["runtime"]["stage_provenance"]["encoder"]
         self.assertEqual(stage["status"], "source_integrity_failed")

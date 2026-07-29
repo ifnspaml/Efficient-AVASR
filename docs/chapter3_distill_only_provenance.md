@@ -325,6 +325,43 @@ within-stage optimizer/scheduler/update restoration. S2 stage transfer is
 separate: weights warm-start stage 2 while optimizer, scheduler, meters,
 iterator, and update count are intentionally reset.
 
+### Pinned Fairseq runtime artifacts
+
+Fairseq's `data_utils_fast` and `token_block_utils_fast` modules are compiled
+Cython extensions. Their `.so` files are ignored build products, so a
+detached Git worktree contains the tracked `.pyx` sources but does not inherit
+extensions previously built in the development checkout. This distinction is
+why a source snapshot can pass Git commit/tree validation but still be unable
+to batch training data.
+
+Pinned worktrees may also be mounted read-only. For new runs, the launcher
+therefore compiles only these two modules from the pinned `.pyx` sources into
+a writable, run-owned runtime overlay before it writes the manifest. A
+hash-recorded `sitecustomize.py` handles only the two compiled module names;
+all ordinary Python modules still load from the pinned worktree. The
+immutable source snapshot records:
+
+- the exact Python interpreter, version, platform, and `SOABI`;
+- the build command, if compilation was required;
+- the required import names and worktree-relative binary paths;
+- each binary's size and SHA256 hash.
+
+Every stage continues to validate the pinned commit and tree and additionally
+validates the recorded runtime hashes. Import preparation uses only the
+pinned repository and vendored Fairseq paths. A development-checkout binary
+is never copied into a run.
+
+The explicit `scripts/distill_only/prepare_source_runtime.py` utility repairs
+a pre-runtime-metadata run by compiling from its already recorded worktree
+into the run-owned overlay. It writes a separate audit record beneath the
+run's `source/` directory and proves that the historical manifest hash did
+not change. It does not rebind the run to the current development commit.
+Because a pre-fix generated resume script cannot know the overlay path, the
+first repaired continuation uses the current committed launcher with the
+historical run's explicit `--run-dir`; model code and Fairseq Python source
+still execute from the manifest's original pinned worktree. New-run resume
+scripts contain the recorded overlay in `PYTHONPATH`.
+
 ## Archived-config hash inventory
 
 All paths below are under `s3prl/result/pretrain/` in the old checkout. This

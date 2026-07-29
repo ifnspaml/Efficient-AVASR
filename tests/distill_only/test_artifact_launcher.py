@@ -172,6 +172,26 @@ class ExplicitCommandInputTest(unittest.TestCase):
                 command,
             )
 
+    def test_runtime_overlay_precedes_pinned_source_on_pythonpath(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            worktree = root / "worktree"
+            runtime = root / "run" / "source" / "runtime" / "fairseq"
+            snapshot = {
+                "worktree_path": str(worktree),
+                "runtime_artifacts": {
+                    "pythonpath_root": str(runtime),
+                },
+            }
+            self.assertEqual(
+                launcher._snapshot_pythonpath(snapshot).split(":"),
+                [
+                    str(runtime.resolve()),
+                    str(worktree.resolve()),
+                    str((worktree / "fairseq").resolve()),
+                ],
+            )
+
 
 class SelectionIdentityTest(unittest.TestCase):
     def test_final_selection_binds_manifest_and_checkpoint_hash(self) -> None:
