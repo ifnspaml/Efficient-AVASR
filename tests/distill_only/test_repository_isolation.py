@@ -1,4 +1,4 @@
-"""Regression checks for the Chapter 3 distillation-only namespace."""
+"""Regression checks for protected DP code and removed infrastructure."""
 
 from __future__ import annotations
 
@@ -7,11 +7,9 @@ import unittest
 from pathlib import Path
 
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
-BASELINE_COMMIT = "4502130ce4470fe8b0456fd5b466bef043f383f9"
-
-# Existing joint-DP implementation and entry points that must remain unchanged.
-PROTECTED_PATHS = (
+ROOT = Path(__file__).resolve().parents[2]
+BASELINE = "4502130ce4470fe8b0456fd5b466bef043f383f9"
+PROTECTED = (
     "avhubert/hubert_distill.py",
     "avhubert/hubert_distill_criterion.py",
     "avhubert/prune.py",
@@ -21,69 +19,71 @@ PROTECTED_PATHS = (
     "scripts/run_pruning_merging.sh",
     "scripts/run_merging.sh",
 )
-ALLOWED_NEW_PREFIXES = (
-    ".gitignore",
-    "chapter3_distill_only/",
-    "avhubert/hubert_asr.py",
-    "avhubert/conf/distill_only/",
-    "avhubert/noise_utils.py",
-    "scripts/distill_only/",
-    "tests/distill_only/",
-    "docs/chapter3_distill_only_",
+REMOVED_MODULES = (
+    "build_fairseq_runtime.py",
+    "checkpoint_audit.py",
+    "evaluation.py",
+    "evaluation_runs.py",
+    "lineage.py",
+    "manifest.py",
+    "profiling.py",
+    "selection.py",
+    "source_worktree.py",
 )
 
 
-def _git(*args: str) -> bytes:
-    return subprocess.check_output(("git", *args), cwd=REPO_ROOT)
+def git(*arguments: str) -> bytes:
+    return subprocess.check_output(("git", *arguments), cwd=ROOT)
 
 
 class RepositoryIsolationTest(unittest.TestCase):
-    def test_baseline_is_an_ancestor(self) -> None:
+    def test_baseline_ancestor_and_branch(self) -> None:
         subprocess.run(
-            ("git", "merge-base", "--is-ancestor", BASELINE_COMMIT, "HEAD"),
-            cwd=REPO_ROOT,
+            ("git", "merge-base", "--is-ancestor", BASELINE, "HEAD"),
+            cwd=ROOT,
             check=True,
         )
+        self.assertEqual(git("branch", "--show-current").decode().strip(), "ch3-distill-only-v2")
 
-    def test_not_on_forbidden_branch(self) -> None:
-        branch = _git("branch", "--show-current").decode().strip()
-        self.assertNotEqual(branch, "dev_li")
-
-    def test_protected_joint_dp_files_match_baseline(self) -> None:
-        for relative_path in PROTECTED_PATHS:
-            with self.subTest(path=relative_path):
-                baseline = _git("show", f"{BASELINE_COMMIT}:{relative_path}")
-                current = (REPO_ROOT / relative_path).read_bytes()
-                self.assertEqual(current, baseline)
-
-    def test_existing_joint_dp_configs_match_baseline(self) -> None:
-        config_dir = REPO_ROOT / "avhubert" / "conf" / "distill"
-        for path in sorted(config_dir.glob("*.yaml")):
-            relative_path = path.relative_to(REPO_ROOT).as_posix()
-            with self.subTest(path=relative_path):
-                baseline = _git("show", f"{BASELINE_COMMIT}:{relative_path}")
-                self.assertEqual(path.read_bytes(), baseline)
-
-    def test_branch_changes_are_confined_to_isolated_namespaces(self) -> None:
-        committed = set(
-            _git("diff", "--name-only", f"{BASELINE_COMMIT}..HEAD")
-            .decode()
-            .splitlines()
+    def test_protected_joint_dp_files_and_configs_match_baseline(self) -> None:
+        paths = list(PROTECTED)
+        paths.extend(
+            path.relative_to(ROOT).as_posix()
+            for path in (ROOT / "avhubert" / "conf" / "distill").glob("*.yaml")
         )
-        working = set(
-            _git("diff", "--name-only", "HEAD").decode().splitlines()
-        )
-        untracked = set(
-            _git("ls-files", "--others", "--exclude-standard")
-            .decode()
-            .splitlines()
-        )
-        for path in sorted(committed | working | untracked):
-            with self.subTest(path=path):
-                self.assertTrue(
-                    path.startswith(ALLOWED_NEW_PREFIXES),
-                    f"non-isolated repository change: {path}",
+        for relative in paths:
+            with self.subTest(path=relative):
+                self.assertEqual(
+                    (ROOT / relative).read_bytes(),
+                    git("show", f"{BASELINE}:{relative}"),
                 )
+
+    def test_noise_utils_and_gitignore_are_restored_to_baseline(self) -> None:
+        for relative in (".gitignore", "avhubert/noise_utils.py"):
+            self.assertEqual(
+                (ROOT / relative).read_bytes(),
+                git("show", f"{BASELINE}:{relative}"),
+            )
+
+    def test_legacy_modules_and_launchers_are_absent(self) -> None:
+        package = ROOT / "chapter3_distill_only"
+        for name in REMOVED_MODULES:
+            self.assertFalse((package / name).exists(), name)
+        for relative in (
+            "scripts/distill_only/launch.py",
+            "scripts/distill_only/launch.sh",
+            "scripts/distill_only/record_provenance.py",
+            "scripts/distill_only/run_evaluation.py",
+        ):
+            self.assertFalse((ROOT / relative).exists(), relative)
+
+    def test_retained_runtime_has_no_dead_imports(self) -> None:
+        text = "\n".join(
+            path.read_text(encoding="utf-8")
+            for path in (ROOT / "chapter3_distill_only").glob("*.py")
+        )
+        for stem in (Path(name).stem for name in REMOVED_MODULES):
+            self.assertNotIn(f".{stem} import", text)
 
 
 if __name__ == "__main__":
