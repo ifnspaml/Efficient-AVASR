@@ -41,6 +41,13 @@ EXPECTED = {
         1024,
         "layer_to_layer",
     ),
+    "c3c_t12_historical_heads_noisy": (
+        "transformer",
+        12,
+        384,
+        1024,
+        "historical_pred_heads",
+    ),
     "d1_selected_transformer": (
         "transformer",
         6,
@@ -153,12 +160,38 @@ class ConfigMatrixTest(unittest.TestCase):
         self.assertEqual(optional["optimization"]["max_update"], 50000)
         self.assertEqual(optional["model"]["schedule_mode"], "two_stage_50k_25k")
 
-    def test_only_e2_enables_distillation_noise(self) -> None:
+    def test_distillation_noise_is_enabled_only_for_e2_and_c3c(self) -> None:
         for name in EXPECTED:
             config = load(name)
-            expected = 0.25 if name == "e2_selected_noisy" else 0.0
-            self.assertEqual(config["task"]["noise_prob"], expected)
+            expected = (
+                0.25
+                if name in {"e2_selected_noisy", "c3c_t12_historical_heads_noisy"}
+                else 0.0
+            )
+            self.assertEqual(config["task"]["distillation_noise_prob"], expected)
             self.assertEqual(config["model"]["distillation_noise_prob"], expected)
+
+    def test_c3c_differs_from_c3a_only_by_dedicated_noise(self) -> None:
+        clean = load("c3a_t12_historical_heads")
+        noisy = load("c3c_t12_historical_heads_noisy")
+        root = "/beegfs/data/shared/lrs3/noise/musan/tsv/all"
+        for section in ("model", "task"):
+            self.assertEqual(noisy[section]["distillation_noise_prob"], 0.25)
+            self.assertEqual(noisy[section]["distillation_noise_snr"], "0")
+            self.assertEqual(noisy[section]["distillation_noise_method"], "rms")
+            self.assertEqual(
+                noisy[section]["distillation_noise_manifest_root"], root
+            )
+            self.assertIs(noisy[section]["distillation_noise_train_only"], True)
+            noisy[section]["distillation_noise_prob"] = clean[section][
+                "distillation_noise_prob"
+            ]
+            noisy[section]["distillation_noise_manifest_root"] = clean[section][
+                "distillation_noise_manifest_root"
+            ]
+        self.assertEqual(noisy["task"]["noise_prob"], 0.0)
+        self.assertIsNone(noisy["task"]["noise_wav"])
+        self.assertEqual(noisy, clean)
 
     def test_no_matrix_directory_or_self_defaults(self) -> None:
         self.assertFalse((CONFIG_ROOT / "_matrix").exists())

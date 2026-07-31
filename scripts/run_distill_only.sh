@@ -31,6 +31,7 @@ gpus=1
 max_tokens=4000
 encoder_update_freq=4
 finetune_update_freq=8
+finetune_lr=0.001
 
 fail() {
     printf 'error: %s\n' "$*" >&2
@@ -46,6 +47,7 @@ Options:
   --stage encoder|stage1|stage2|export|finetune|evaluate|all
   --seed INTEGER
   --run-name NAME
+  --finetune-lr FLOAT
   --input-checkpoint PATH
   --eval-name NAME
   --eval-subsets valid|test|valid,test
@@ -66,6 +68,7 @@ parse_args() {
             --stage) need_value "$@"; stage=$2; shift 2 ;;
             --seed) need_value "$@"; seed=$2; shift 2 ;;
             --run-name) need_value "$@"; run_name=$2; shift 2 ;;
+            --finetune-lr) need_value "$@"; finetune_lr=$2; shift 2 ;;
             --input-checkpoint) need_value "$@"; input_checkpoint=$2; shift 2 ;;
             --eval-name) need_value "$@"; eval_name=$2; shift 2 ;;
             --eval-subsets) need_value "$@"; eval_subsets=$2; shift 2 ;;
@@ -92,6 +95,19 @@ validate_args() {
     validate_name "run name" "$run_name"
     [[ "$seed" =~ ^[0-9]+$ && "$seed" -gt 0 ]] ||
         fail "seed must be a positive integer"
+    if ! python - "$finetune_lr" <<'PY'
+import math
+import sys
+
+try:
+    value = float(sys.argv[1])
+except ValueError:
+    raise SystemExit(1)
+raise SystemExit(0 if math.isfinite(value) and value > 0 else 1)
+PY
+    then
+        fail "--finetune-lr must be a positive finite number"
+    fi
     case "$stage" in
         encoder|stage1|stage2|export|finetune|evaluate|all) ;;
         *) fail "unsupported stage: $stage" ;;
@@ -380,6 +396,7 @@ run_finetune() {
         "task.noise_snr=0" "model.w2v_path=${parent}"
         "distributed_training.distributed_world_size=${gpus}"
         "distributed_training.nprocs_per_node=${gpus}"
+        "optimization.lr=[${finetune_lr}]"
         "optimization.update_freq=[${finetune_update_freq}]"
         "dataset.num_workers=${workers}" "common.seed=${seed}"
         "common.user_dir=${project_path}/chapter3_distill_only"
@@ -486,6 +503,7 @@ print_plan() {
         "$encoder_path" "$export_checkpoint"
     printf 'Fine-tuning output: %s\nEvaluation output: %s\n' \
         "$finetune_path" "$evaluation_path"
+    printf 'Fine-tuning LR: %s\n' "$finetune_lr"
     printf 'Source: %s %s (dirty=%s)\n' \
         "$source_branch" "$source_commit" "$source_dirty"
 }

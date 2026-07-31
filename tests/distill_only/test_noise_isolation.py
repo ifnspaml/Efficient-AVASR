@@ -14,10 +14,10 @@ class NoiseIsolationTest(unittest.TestCase):
     def test_validation_never_loads_noise_and_config_is_restored(self) -> None:
         task = object.__new__(AVHubertDistillOnlyTask)
         task.cfg = SimpleNamespace(
-            noise_prob=0.25,
+            noise_prob=0.0,
             noise_snr="0",
             noise_method="rms",
-            noise_wav="/fixed/noise",
+            noise_wav=None,
             distillation_noise_prob=0.25,
             distillation_noise_snr="0",
             distillation_noise_method="rms",
@@ -52,8 +52,8 @@ class NoiseIsolationTest(unittest.TestCase):
             observed["train"],
             {"probability": 0.25, "root": "/fixed/noise", "method": "rms"},
         )
-        self.assertEqual(task.cfg.noise_prob, 0.25)
-        self.assertEqual(task.cfg.noise_wav, "/fixed/noise")
+        self.assertEqual(task.cfg.noise_prob, 0.0)
+        self.assertIsNone(task.cfg.noise_wav)
         self.assertEqual(task.cfg.noise_method, "rms")
 
 

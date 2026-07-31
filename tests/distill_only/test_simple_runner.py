@@ -65,8 +65,47 @@ class SimpleRunnerTest(unittest.TestCase):
             f"common.user_dir={ROOT}/chapter3_distill_only", result.stdout
         )
         self.assertIn("optimization.update_freq=\\[8\\]", result.stdout)
+        self.assertIn("Fine-tuning LR: 0.001", result.stdout)
+        self.assertIn("optimization.lr=\\[0.001\\]", result.stdout)
         self.assertNotIn("override.noise_method=itut", result.stdout)
         self.assertFalse(target.exists())
+
+    def test_finetune_lr_override_and_validation(self) -> None:
+        result = run(
+            (
+                "--exp-name",
+                "c3c_t12_historical_heads_noisy",
+                "--stage",
+                "finetune",
+                "--seed",
+                "999994",
+                "--run-name",
+                f"lr-{uuid.uuid4().hex}",
+                "--input-checkpoint",
+                "/tmp/nonexistent-for-dry-run.pt",
+                "--finetune-lr",
+                "0.0005",
+                "--dry-run",
+            )
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Fine-tuning LR: 0.0005", result.stdout)
+        self.assertIn("optimization.lr=\\[0.0005\\]", result.stdout)
+        for value in ("0", "-0.1", "not-a-number", "nan", "inf"):
+            with self.subTest(value=value):
+                invalid = run(
+                    (
+                        "--exp-name",
+                        "c3c_t12_historical_heads_noisy",
+                        "--stage",
+                        "finetune",
+                        "--finetune-lr",
+                        value,
+                        "--dry-run",
+                    )
+                )
+                self.assertNotEqual(invalid.returncode, 0)
+                self.assertIn("positive finite number", invalid.stderr)
 
     def test_evaluation_dry_run_expands_clean_and_itut_noise(self) -> None:
         label = f"eval-{uuid.uuid4().hex}"

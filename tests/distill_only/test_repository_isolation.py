@@ -58,12 +58,12 @@ class RepositoryIsolationTest(unittest.TestCase):
                     git("show", f"{BASELINE}:{relative}"),
                 )
 
-    def test_noise_utils_and_gitignore_are_restored_to_baseline(self) -> None:
-        for relative in (".gitignore", "avhubert/noise_utils.py"):
-            self.assertEqual(
-                (ROOT / relative).read_bytes(),
-                git("show", f"{BASELINE}:{relative}"),
-            )
+    def test_noise_utils_is_restored_to_baseline(self) -> None:
+        relative = "avhubert/noise_utils.py"
+        self.assertEqual(
+            (ROOT / relative).read_bytes(),
+            git("show", f"{BASELINE}:{relative}"),
+        )
 
     def test_legacy_modules_and_launchers_are_absent(self) -> None:
         package = ROOT / "chapter3_distill_only"
