@@ -12,9 +12,9 @@ set -euo pipefail
 
 PROJECT=/home/zhengyangli/work_fast/dpav_hubert_new
 
-INPUT_CHECKPOINT="${PROJECT}/exp/chapter3_distill_only/c2_t6_historical_heads/seed_1337/export/student.pt"
+INPUT_CHECKPOINT="${PROJECT}/exp/chapter3_distill_only/b1_t2_teacher_init/seed_1337/export/student.pt"
 
-OUTPUT_DIR="${PROJECT}/exp/chapter3_distill_only/c2_t6_historical_heads/seed_1337/finetune_runs/lr5e-4-0005"
+OUTPUT_DIR="${PROJECT}/exp/chapter3_distill_only/b1_t2_teacher_init/seed_1337/finetune_runs/lr5e-4-0005"
 
 DATA=/beegfs/data/shared/lrs3/433h_data_avhubert
 TOKENIZER=/beegfs/data/shared/lrs3/spm1000/spm_unigram1000.model
@@ -28,7 +28,7 @@ cd "${PROJECT}"
 export PYTHONDONTWRITEBYTECODE=1
 export PYTHONPATH="${PROJECT}/fairseq:${PROJECT}${PYTHONPATH:+:${PYTHONPATH}}"
 
-export WANDB_NAME=c3b-t12-finetune-lr5e-4-0005
+export WANDB_NAME=b1_t2-teacher-init-finetune-lr5e-4-0005
 
 if [[ ! -f "${INPUT_CHECKPOINT}" ]]; then
     echo "Missing input checkpoint: ${INPUT_CHECKPOINT}" >&2
