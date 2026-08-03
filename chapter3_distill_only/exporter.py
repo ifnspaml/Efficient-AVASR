@@ -104,7 +104,9 @@ def _expected_student(wrapper: AVHubertDistillOnly) -> Dict[str, Any]:
 
 
 def _export_payload(
-    wrapper: AVHubertDistillOnly, source_checkpoint: Path
+    wrapper: AVHubertDistillOnly,
+    source_checkpoint: Path,
+    include_digests: bool = True,
 ) -> Dict[str, Any]:
     payload = copy.deepcopy(wrapper.get_export_state())
     payload.setdefault("criterion", None)
@@ -118,17 +120,20 @@ def _export_payload(
         {
             "exported_at": _utc_now(),
             "source_distillation_checkpoint": str(source_checkpoint.resolve()),
-            "source_distillation_checkpoint_sha256": _sha256_file(
-                source_checkpoint
-            ),
             "parameters": _parameter_counts(wrapper),
         }
     )
+    if include_digests:
+        metadata["source_distillation_checkpoint_sha256"] = _sha256_file(
+            source_checkpoint
+        )
     return payload
 
 
 def verify_export(
-    checkpoint: Path, expected: Optional[Mapping[str, Any]] = None
+    checkpoint: Path,
+    expected: Optional[Mapping[str, Any]] = None,
+    include_digest: bool = True,
 ) -> Dict[str, Any]:
     state = checkpoint_utils.load_checkpoint_to_cpu(str(checkpoint))
     models, _ = checkpoint_utils.load_model_ensemble(
@@ -146,8 +151,9 @@ def verify_export(
         "student_arch": model.cfg.student_arch,
         "encoder_depth": len(model.encoder.layers),
         "encoder_embed_dim": model.encoder_embed_dim,
-        "checkpoint_sha256": _sha256_file(checkpoint),
     }
+    if include_digest:
+        report["checkpoint_sha256"] = _sha256_file(checkpoint)
     if expected is not None:
         for key in ("student_arch", "encoder_depth", "encoder_embed_dim"):
             if report[key] != expected[key]:
@@ -180,7 +186,11 @@ def verify_export(
     return report
 
 
-def export_checkpoint(source_checkpoint: Path, output: Path) -> Dict[str, Any]:
+def export_checkpoint(
+    source_checkpoint: Path,
+    output: Path,
+    include_digests: bool = True,
+) -> Dict[str, Any]:
     if not source_checkpoint.is_file():
         raise ExportError(
             f"Distillation checkpoint does not exist: {source_checkpoint}"
@@ -188,17 +198,22 @@ def export_checkpoint(source_checkpoint: Path, output: Path) -> Dict[str, Any]:
     wrapper = _load_wrapper(source_checkpoint)
     expected = _expected_student(wrapper)
     parameters = _parameter_counts(wrapper)
-    _atomic_torch_save(_export_payload(wrapper, source_checkpoint), output)
+    _atomic_torch_save(
+        _export_payload(wrapper, source_checkpoint, include_digests), output
+    )
     result = {
         "schema_version": "chapter3-student-export/v1",
         "exported_at": _utc_now(),
         "source": str(source_checkpoint.resolve()),
-        "source_sha256": _sha256_file(source_checkpoint),
         "output": str(output.resolve()),
-        "checkpoint_sha256": _sha256_file(output),
         "parameters": parameters,
-        "verification": verify_export(output, expected),
+        "verification": verify_export(
+            output, expected, include_digest=include_digests
+        ),
     }
+    if include_digests:
+        result["source_sha256"] = _sha256_file(source_checkpoint)
+        result["checkpoint_sha256"] = _sha256_file(output)
     _atomic_write_json(output.with_suffix(output.suffix + ".metadata.json"), result)
     return result
 
@@ -209,6 +224,11 @@ def _parse_args() -> argparse.Namespace:
     source.add_argument("--distilled-checkpoint", type=Path)
     source.add_argument("--verify-existing", type=Path)
     parser.add_argument("--output", type=Path)
+    parser.add_argument(
+        "--no-digest-metadata",
+        action="store_true",
+        help="perform structural verification without calculating SHA metadata",
+    )
     args = parser.parse_args()
     if args.distilled_checkpoint is not None and args.output is None:
         parser.error("--output is required with --distilled-checkpoint")
@@ -220,9 +240,15 @@ def _parse_args() -> argparse.Namespace:
 def main() -> None:
     args = _parse_args()
     if args.verify_existing is not None:
-        result = verify_export(args.verify_existing)
+        result = verify_export(
+            args.verify_existing, include_digest=not args.no_digest_metadata
+        )
     else:
-        result = export_checkpoint(args.distilled_checkpoint, args.output)
+        result = export_checkpoint(
+            args.distilled_checkpoint,
+            args.output,
+            include_digests=not args.no_digest_metadata,
+        )
     print(json.dumps(result, indent=2, sort_keys=True))
 
 

@@ -43,7 +43,7 @@ class RepositoryIsolationTest(unittest.TestCase):
             cwd=ROOT,
             check=True,
         )
-        self.assertEqual(git("branch", "--show-current").decode().strip(), "ch3-distill-only-v2")
+        self.assertEqual(git("branch", "--show-current").decode().strip(), "ch3-distill-only-v3")
 
     def test_protected_joint_dp_files_and_configs_match_baseline(self) -> None:
         paths = list(PROTECTED)

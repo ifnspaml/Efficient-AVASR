@@ -1,0 +1,17 @@
+# @package _global_
+
+# Dedicated train-only encoder-distillation noise. Ordinary task noise remains
+# disabled by base_continuous_75k.yaml.
+model:
+  distillation_noise_prob: 0.25
+  distillation_noise_snr: "0"
+  distillation_noise_method: rms
+  distillation_noise_manifest_root: /beegfs/data/shared/lrs3/noise/musan/tsv/all
+  distillation_noise_train_only: true
+
+task:
+  distillation_noise_prob: 0.25
+  distillation_noise_snr: "0"
+  distillation_noise_method: rms
+  distillation_noise_manifest_root: /beegfs/data/shared/lrs3/noise/musan/tsv/all
+  distillation_noise_train_only: true

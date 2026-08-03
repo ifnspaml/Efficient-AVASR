@@ -1,0 +1,130 @@
+# @package _global_
+
+# Scientific context:
+# https://github.com/joyolee/PhD-Thesis-Zhengyang-Li-2026/issues/12#issue-4905908061
+# Shared 50k joint distillation-and-pruning stage for Chapter 3 v3.
+
+common:
+  amp: true
+  log_format: json
+  log_interval: 100
+  tensorboard_logdir: tblog
+  wandb_project: chapter3-joint-dp-v3
+  seed: 1337
+  user_dir: ???
+
+checkpoint:
+  save_interval: 1
+  save_interval_updates: 0
+  keep_interval_updates: 1
+  no_epoch_checkpoints: true
+
+distributed_training:
+  ddp_backend: c10d
+  find_unused_parameters: true
+  distributed_world_size: 1
+  nprocs_per_node: 1
+
+task:
+  _name: av_hubert_pretraining
+  is_s2s: true
+  data: ???
+  label_dir: ???
+  tokenizer_bpe_model: ???
+  normalize: true
+  labels: ["wrd"]
+  single_target: true
+  fine_tuning: true
+  stack_order_audio: 4
+  tokenizer_bpe_name: sentencepiece
+  max_sample_size: 500
+  modalities: ["video", "audio"]
+  image_aug: true
+  pad_audio: true
+  random_crop: false
+  noise_prob: 0.25
+  noise_snr: 0
+  noise_wav: ???
+
+dataset:
+  num_workers: 4
+  max_tokens: 4000
+  validate_after_updates: 0
+  validate_interval: 1
+  train_subset: train
+  valid_subset: valid
+
+criterion:
+  _name: av_hubert_distill
+  l2_weight: 0.0
+  cos_weight: 1.0
+  use_reg: true
+  sparsity_warmup_updates: 10000
+
+optimization:
+  max_update: 50000
+  clip_norm: 10.0
+  update_freq: [4]
+
+optimizer:
+  _name: composite
+  groups:
+    main:
+      lr: [0.002]
+      optimizer:
+        _name: adam
+        adam_betas: (0.9,0.999)
+        adam_eps: 1e-08
+        weight_decay: 0.0
+      lr_scheduler:
+        _name: polynomial_decay
+        power: 1
+        warmup_updates: 15000
+    log_alpha:
+      lr: [0.02]
+      optimizer:
+        _name: adam
+        adam_betas: (0.9,0.999)
+        adam_eps: 1e-08
+        weight_decay: 0.0
+      lr_scheduler:
+        _name: polynomial_decay
+        power: 1
+        warmup_updates: 15000
+    lambda:
+      lr: [-0.02]
+      optimizer:
+        _name: adam
+        adam_betas: (0.9,0.999)
+        adam_eps: 1e-08
+        weight_decay: 0.0
+      lr_scheduler:
+        _name: polynomial_decay
+        power: 1
+        warmup_updates: 15000
+
+lr_scheduler: pass_through
+
+model:
+  _name: av_hubert_distill
+  teacher_path: ???
+  student_path: ???
+  distill_layers: 0.4,8,12
+  distill_mode: layer2layer
+  apply_mask: false
+  mask_selection: static
+  mask_length: 10
+  mask_other: 0
+  mask_prob: 0.75
+  mask_channel_selection: static
+  mask_channel_length: 64
+  mask_channel_other: 0
+  mask_channel_prob: 0.5
+  feature_grad_mult: 1.0
+
+hydra:
+  run:
+    dir: ???
+  sweep:
+    dir: ???
+    subdir: ${hydra.job.config_name}__${hydra.job.override_dirname}

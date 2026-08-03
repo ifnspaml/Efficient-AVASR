@@ -1,0 +1,5 @@
+# @package _global_
+defaults: [base_post_distill_25k]
+criterion:
+  l1_weight: ???
+  cos_type: ???

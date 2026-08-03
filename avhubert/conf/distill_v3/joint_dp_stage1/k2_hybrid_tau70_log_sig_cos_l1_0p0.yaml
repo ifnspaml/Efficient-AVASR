@@ -1,0 +1,4 @@
+# @package _global_
+defaults: [base_joint_dp_50k]
+criterion: {l1_weight: 0.0, cos_type: log_sig, target_sparsity: 0.70}
+model: {pruning_units: "conv,head,interm"}

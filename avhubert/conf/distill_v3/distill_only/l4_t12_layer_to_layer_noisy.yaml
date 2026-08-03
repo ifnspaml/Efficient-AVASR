@@ -1,0 +1,10 @@
+# @package _global_
+
+defaults:
+  - l_base_t12_selected_student
+  - _protocol_noisy
+
+model:
+  distill_head_mode: layer_to_layer
+  teacher_target_layers: "0,4,8,12"
+  student_match_layers: "0,4,8,12"

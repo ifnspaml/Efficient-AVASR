@@ -1,0 +1,133 @@
+# @package _global_
+
+# Scientific context:
+# https://github.com/joyolee/PhD-Thesis-Zhengyang-Li-2026/issues/12#issue-4905908061
+# Shared pruning-free Chapter 3 v3 distillation-only protocol.
+
+common:
+  amp: true
+  log_format: json
+  log_interval: 100
+  tensorboard_logdir: tblog
+  wandb_project: chapter3-distill-only-v3
+  seed: 1337
+  user_dir: ???
+
+checkpoint:
+  save_interval: 1
+  save_interval_updates: 0
+  keep_interval_updates: 1
+  no_epoch_checkpoints: true
+  finetune_from_model: null
+
+distributed_training:
+  ddp_backend: c10d
+  find_unused_parameters: true
+  distributed_world_size: 1
+  nprocs_per_node: 1
+
+task:
+  _name: av_hubert_distill_only
+  is_s2s: true
+  data: ???
+  label_dir: ???
+  tokenizer_bpe_model: ???
+  normalize: true
+  labels: ["wrd"]
+  single_target: true
+  fine_tuning: true
+  stack_order_audio: 4
+  tokenizer_bpe_name: sentencepiece
+  max_sample_size: 500
+  modalities: ["video", "audio"]
+  image_aug: true
+  pad_audio: true
+  random_crop: false
+  noise_num: 1
+  noise_prob: 0.0
+  noise_snr: "0"
+  noise_method: rms
+  noise_wav: null
+
+dataset:
+  num_workers: 4
+  max_tokens: 4000
+  validate_after_updates: 0
+  validate_interval: 1
+  train_subset: train
+  valid_subset: valid
+
+criterion:
+  _name: av_hubert_distill_only
+  distill_loss_type: historical
+  l1_weight: 1.0
+  l2_weight: 0.0
+  cosine_weight: 1.0
+  cosine_type: log_sig
+  feature_penalty_weight: 0.0
+
+optimization:
+  max_update: 75000
+  lr: [0.002]
+  clip_norm: 10.0
+  update_freq: [4]
+
+optimizer:
+  _name: adam
+  adam_betas: (0.9,0.999)
+  adam_eps: 1e-08
+  weight_decay: 0.0
+
+lr_scheduler:
+  _name: polynomial_decay
+  power: 1
+  warmup_updates: 15000
+  total_num_update: 75000
+
+model:
+  _name: av_hubert_distill_only
+  teacher_path: /home/zhengyangli/work/av_hubert_pre_trained_models/phd_thesis/base_vox_iter5.pt
+  student_dropout: 0.1
+  student_attention_dropout: 0.1
+  student_activation_dropout: 0.1
+  student_layerdrop: 0.0
+  student_layer_norm_first: false
+  student_dropout_input: 0.0
+  student_conv_pos: 128
+  student_conv_pos_groups: 16
+  student_conformer_kernel: 31
+  student_conformer_attention_type: original
+  student_conformer_position_type: abs
+  prediction_head_hidden_dim: -1
+  distill_loss_type: historical
+  l1_weight: 1.0
+  l2_weight: 0.0
+  cosine_weight: 1.0
+  cosine_type: log_sig
+  feature_penalty_weight: 0.0
+  feature_grad_mult: 1.0
+  schedule_mode: continuous_75k
+  stage1_lr: 0.002
+  stage2_lr: 0.0001
+  max_update: 75000
+  warmup_updates: 15000
+
+hydra:
+  job:
+    config:
+      override_dirname:
+        kv_sep: "-"
+        item_sep: "__"
+        exclude_keys:
+          - run
+          - task.data
+          - task.label_dir
+          - task.tokenizer_bpe_model
+          - common.user_dir
+          - dataset.train_subset
+          - dataset.valid_subset
+  run:
+    dir: ???
+  sweep:
+    dir: ???
+    subdir: ${hydra.job.config_name}__${hydra.job.override_dirname}

@@ -1,0 +1,4 @@
+# @package _global_
+defaults: [base_joint_dp_50k]
+criterion: {l1_weight: 1.0, cos_type: raw, target_sparsity: 0.70}
+model: {pruning_units: "conv,head,interm"}

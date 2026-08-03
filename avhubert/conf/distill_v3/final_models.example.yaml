@@ -1,0 +1,12 @@
+# Populate a copy of this file only after final validation-based selection.
+# A4/F0 remains unresolved until its comparison protocol is agreed.
+f0_teacher_base:
+  checkpoint: null
+f1_best_manual:
+  checkpoint: null
+f2_best_wer_joint_dp:
+  checkpoint: null
+f3_best_efficiency_joint_dp:
+  checkpoint: null
+f4_published_compact_reference:
+  checkpoint: null
