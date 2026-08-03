@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 #SBATCH --time=8-00:00:00
 #SBATCH --partition=ifn
+#SBATCH --qos=low
 #SBATCH --gres=gpu:pro6000b_96gb:1
 #SBATCH --exclude=gpu[04,05]
-#SBATCH --cpus-per-task=2
+#SBATCH --cpus-per-task=32
 #SBATCH --ntasks-per-node=1
-#SBATCH --mem=48gb
+#SBATCH --mem=64gb
 #SBATCH --job-name=ch3-distill-only
 
 set -euo pipefail
@@ -26,7 +27,7 @@ teacher_ckpt="/home/zhengyangli/work/av_hubert_pre_trained_models/phd_thesis/bas
 data_path="/beegfs/data/shared/lrs3/433h_data_avhubert"
 tokenizer_ckpt="/beegfs/data/shared/lrs3/spm1000/spm_unigram1000.model"
 finetune_noise_path="/beegfs/data/shared/lrs3/noise/musan/tsv/all"
-workers=4
+workers=24
 gpus=1
 max_tokens=4000
 encoder_update_freq=4

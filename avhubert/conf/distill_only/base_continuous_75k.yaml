@@ -91,7 +91,6 @@ model:
   student_conformer_attention_type: original
   student_conformer_position_type: abs
   prediction_head_hidden_dim: -1
-  teacher_target_layers: "0,4,8,12"
   distill_loss_type: historical
   l1_weight: 1.0
   l2_weight: 0.0
