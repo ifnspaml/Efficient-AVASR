@@ -1,5 +1,9 @@
 avhubert/pretrained/
 exp/
+env/
+docs/
+tests/
+log_old/
 
 # Slurm files
 *.out
@@ -13,7 +17,3 @@ __pycache__/
 *.vscode
 
 ~/
-env/
-docs/
-tests/
-log_old/
