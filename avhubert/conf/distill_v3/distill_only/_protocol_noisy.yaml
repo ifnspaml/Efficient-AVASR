@@ -8,6 +8,7 @@ model:
   distillation_noise_method: rms
   distillation_noise_manifest_root: /beegfs/data/shared/lrs3/noise/musan/tsv/all
   distillation_noise_train_only: true
+  distillation_noise_student_only: false
 
 task:
   distillation_noise_prob: 0.25
@@ -15,3 +16,4 @@ task:
   distillation_noise_method: rms
   distillation_noise_manifest_root: /beegfs/data/shared/lrs3/noise/musan/tsv/all
   distillation_noise_train_only: true
+  distillation_noise_student_only: false

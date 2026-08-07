@@ -1,0 +1,9 @@
+# @package _global_
+
+# Applied after _protocol_noisy so clean-teacher / noisy-student wins
+# under Hydra's defaults-after-body composition order.
+model:
+  distillation_noise_student_only: true
+
+task:
+  distillation_noise_student_only: true

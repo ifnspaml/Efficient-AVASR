@@ -21,6 +21,9 @@ class AVHubertDistillOnlyTaskConfig(AVHubertPretrainingConfig):
     distillation_noise_method: Optional[str] = field(default=None)
     distillation_noise_manifest_root: Optional[str] = field(default=None)
     distillation_noise_train_only: bool = field(default=True)
+    # When True, train batches keep clean audio for the teacher and (possibly)
+    # noisy audio for the student. Default False preserves shared-noise runs.
+    distillation_noise_student_only: bool = field(default=False)
 
 
 @register_task(DISTILL_TASK_NAME, dataclass=AVHubertDistillOnlyTaskConfig)
@@ -82,3 +85,8 @@ class AVHubertDistillOnlyTask(AVHubertPretrainingTask):
                 raise AssertionError(
                     f"Noise leaked into non-training split {split!r}"
                 )
+        if (
+            getattr(self.cfg, "distillation_noise_student_only", False)
+            and dataset.noise_prob > 0
+        ):
+            dataset.provide_clean_audio = True

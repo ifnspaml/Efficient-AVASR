@@ -89,6 +89,7 @@ class AVHubertDistillOnlyConfig(FairseqDataclass):
     distillation_noise_method: str = field(default="rms")
     distillation_noise_manifest_root: Optional[str] = field(default=None)
     distillation_noise_train_only: bool = field(default=True)
+    distillation_noise_student_only: bool = field(default=False)
 
     # Serialized checkpoint construction configs. They avoid relying on
     # architecture-specific code paths when resuming.
@@ -279,6 +280,7 @@ class AVHubertDistillOnly(BaseFairseqModel):
         for name, time_axis, expected_rank in (
             ("audio", 2, 3),
             ("video", 2, 5),
+            ("audio_clean", 2, 3),
         ):
             value = source.get(name)
             if value is None:
@@ -316,6 +318,22 @@ class AVHubertDistillOnly(BaseFairseqModel):
         return batch, frames
 
     @staticmethod
+    def _teacher_student_sources(source: Mapping[str, torch.Tensor]):
+        """Route clean audio to the teacher when audio_clean is present."""
+        audio_clean = source.get("audio_clean")
+        if audio_clean is None:
+            return source, source
+        teacher_source = {
+            "audio": audio_clean,
+            "video": source.get("video"),
+        }
+        student_source = {
+            "audio": source.get("audio"),
+            "video": source.get("video"),
+        }
+        return teacher_source, student_source
+
+    @staticmethod
     def _validate_output_padding(
         name: str,
         output_padding_mask: Optional[torch.Tensor],
@@ -344,10 +362,11 @@ class AVHubertDistillOnly(BaseFairseqModel):
 
     def forward(self, source, padding_mask=None, **unused):
         self._validate_source_padding(source, padding_mask)
+        teacher_source, student_source = self._teacher_student_sources(source)
         self.teacher.eval()
         with torch.no_grad():
             teacher_all = self.teacher.extract_intermediate_features(
-                source=source,
+                source=teacher_source,
                 padding_mask=padding_mask,
                 mask=False,
             )
@@ -372,7 +391,7 @@ class AVHubertDistillOnly(BaseFairseqModel):
         if self.distill_head_mode == "historical_pred_heads":
             student_final, feature_penalty, student_padding_mask = (
                 self.student.extract_distillation_features(
-                    source=source,
+                    source=student_source,
                     padding_mask=padding_mask,
                     return_intermediates=False,
                 )
@@ -381,7 +400,7 @@ class AVHubertDistillOnly(BaseFairseqModel):
         elif self.distill_head_mode == "layer_to_layer":
             student_all, feature_penalty, student_padding_mask = (
                 self.student.extract_distillation_features(
-                    source=source,
+                    source=student_source,
                     padding_mask=padding_mask,
                     return_intermediates=True,
                 )

@@ -8,9 +8,28 @@
 #SBATCH --mem=48gb
 #SBATCH --job-name=ch3-v3-final-eval
 
+
+PYTHON_VIRTUAL_ENVIRONMENT=dpavhubert_pro6000
+CONDA_ROOT=/home/zhengyangli/anaconda3/
+source ${CONDA_ROOT}/etc/profile.d/conda.sh
+conda activate $PYTHON_VIRTUAL_ENVIRONMENT
+
 set -euo pipefail
 
+# Under Slurm, the batch file is copied to …/slurm_script, so BASH_SOURCE no
+# longer sits next to distill_only/. Recover via SLURM_SUBMIT_DIR when needed.
 script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+if [[ ! -f "${script_dir}/distill_only/common.sh" ]]; then
+    if [[ -n "${SLURM_SUBMIT_DIR:-}" && -f "${SLURM_SUBMIT_DIR}/scripts_v3/distill_only/common.sh" ]]; then
+        script_dir="${SLURM_SUBMIT_DIR}/scripts_v3"
+    elif [[ -n "${SLURM_SUBMIT_DIR:-}" && -f "${SLURM_SUBMIT_DIR}/distill_only/common.sh" ]]; then
+        script_dir="${SLURM_SUBMIT_DIR}"
+    else
+        printf 'error: cannot locate scripts_v3/distill_only/common.sh (got script_dir=%s)\n' \
+            "$script_dir" >&2
+        exit 2
+    fi
+fi
 # shellcheck source=distill_only/common.sh
 source "${script_dir}/distill_only/common.sh"
 

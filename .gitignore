@@ -16,3 +16,4 @@ __pycache__/
 env/
 docs/
 tests/
+log_old/

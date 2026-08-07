@@ -30,6 +30,7 @@ A_CONFIGS = {
     "a1_t2_random_sequence_noisy": (2, 768, 3072, "random_sequence_teacher_frontend"),
     "a2_t6_historical_heads_noisy": (6, 384, 3200, "random_sequence_teacher_frontend"),
     "a3_t12_historical_heads_noisy": (12, 384, 1024, "random_sequence_teacher_frontend"),
+    "a4_t12_historical_heads_noisy_student_only": (12, 384, 1024, "random_sequence_teacher_frontend"),
 }
 L_CONFIGS = {
     "l0_t12_historical_heads_noisy": ("historical_pred_heads", "0,4,8,12", "", 0.25),
@@ -97,6 +98,10 @@ class V3ConfigTest(unittest.TestCase):
                     self.assertEqual(cfg[section]["distillation_noise_method"], "rms")
                     self.assertEqual(cfg[section]["distillation_noise_manifest_root"], noise_root)
                     self.assertIs(cfg[section]["distillation_noise_train_only"], True)
+                    self.assertIs(
+                        cfg[section]["distillation_noise_student_only"],
+                        name == "a4_t12_historical_heads_noisy_student_only",
+                    )
                 self.assertEqual(cfg["task"]["noise_prob"], 0.0)
                 self.assertIsNone(cfg["task"]["noise_wav"])
 

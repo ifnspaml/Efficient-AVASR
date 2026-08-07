@@ -192,6 +192,9 @@ class AVHubertDataset(FairseqDataset):
         self.is_s2s = is_s2s
         self.noise_wav, self.noise_prob, self.noise_snr, self.noise_num = [ln.strip() for ln in open(noise_fn).readlines()] if noise_fn is not None else [], noise_prob, noise_snr, noise_num
         self.noise_method = noise_method
+        # Distill-only hook: when True, also return clean logfbank alongside
+        # (possibly) noisy student audio. Default stays False for all callers.
+        self.provide_clean_audio = False
 
         assert self.single_target == (self.label_rates[0] == -1), f"single target should be equivalent to sequence label (label_rate==-1)"
         if store_labels:
@@ -253,50 +256,83 @@ class AVHubertDataset(FairseqDataset):
     def get_labels(self, index):
         return [self.get_label(index, i) for i in range(self.num_labels)]
 
+    @staticmethod
+    def _stack_audio_frames(feats, stack_order):
+        """Concatenate consecutive audio frames into stacked frames."""
+        feat_dim = feats.shape[1]
+        if len(feats) % stack_order != 0:
+            res = stack_order - len(feats) % stack_order
+            res = np.zeros([res, feat_dim]).astype(feats.dtype)
+            feats = np.concatenate([feats, res], axis=0)
+        feats = feats.reshape((-1, stack_order, feat_dim)).reshape(
+            -1, stack_order * feat_dim
+        )
+        return feats
+
+    @staticmethod
+    def _align_audio_to_video(audio_feats, video_feats):
+        if audio_feats is None or video_feats is None:
+            return audio_feats
+        diff = len(audio_feats) - len(video_feats)
+        if diff < 0:
+            audio_feats = np.concatenate(
+                [
+                    audio_feats,
+                    np.zeros(
+                        [-diff, audio_feats.shape[-1]], dtype=audio_feats.dtype
+                    ),
+                ]
+            )
+        elif diff > 0:
+            audio_feats = audio_feats[:-diff]
+        return audio_feats
+
+    def _wav_to_audio_feats(self, wav_data, sample_rate):
+        audio_feats = logfbank(wav_data, samplerate=sample_rate).astype(
+            np.float32
+        )
+        return self._stack_audio_frames(audio_feats, self.stack_order_audio)
+
     def load_feature(self, mix_name):
         """
         Load image and audio feature
         Returns:
-        video_feats: numpy.ndarray of shape [T, H, W, 1], audio_feats: numpy.ndarray of shape [T, F]
+        video_feats: numpy.ndarray of shape [T, H, W, 1]
+        audio_feats: numpy.ndarray of shape [T, F] (student / shared)
+        audio_clean_feats: clean logfbank when provide_clean_audio else None
         """
-        def stacker(feats, stack_order):
-            """
-            Concatenating consecutive audio frames
-            Args:
-            feats - numpy.ndarray of shape [T, F]
-            stack_order - int (number of neighboring frames to concatenate
-            Returns:
-            feats - numpy.ndarray of shape [T', F']
-            """
-            feat_dim = feats.shape[1]
-            if len(feats) % stack_order != 0:
-                res = stack_order - len(feats) % stack_order
-                res = np.zeros([res, feat_dim]).astype(feats.dtype)
-                feats = np.concatenate([feats, res], axis=0)
-            feats = feats.reshape((-1, stack_order, feat_dim)).reshape(-1, stack_order*feat_dim)
-            return feats
         video_fn, audio_fn = mix_name
         if 'video' in self.modalities:
             video_feats = self.load_video(video_fn) # [T, H, W, 1]
         else:
             video_feats = None
+        audio_clean_feats = None
         if 'audio' in self.modalities:
             audio_fn = audio_fn.split(':')[0]
             sample_rate, wav_data = wavfile.read(audio_fn)
             assert sample_rate == 16_000 and len(wav_data.shape) == 1
-            if np.random.rand() < self.noise_prob:
-                wav_data = self.add_noise(wav_data)
-            audio_feats = logfbank(wav_data, samplerate=sample_rate).astype(np.float32) # [T, F]
-            audio_feats = stacker(audio_feats, self.stack_order_audio) # [T/stack_order_audio, F*stack_order_audio]
+            if self.provide_clean_audio:
+                audio_clean_feats = self._wav_to_audio_feats(
+                    wav_data, sample_rate
+                )
+                if np.random.rand() < self.noise_prob:
+                    noisy_wav = self.add_noise(wav_data)
+                    audio_feats = self._wav_to_audio_feats(
+                        noisy_wav, sample_rate
+                    )
+                else:
+                    audio_feats = audio_clean_feats.copy()
+            else:
+                if np.random.rand() < self.noise_prob:
+                    wav_data = self.add_noise(wav_data)
+                audio_feats = self._wav_to_audio_feats(wav_data, sample_rate)
         else:
             audio_feats = None
-        if audio_feats is not None and video_feats is not None:
-            diff = len(audio_feats) - len(video_feats)
-            if diff < 0:
-                audio_feats = np.concatenate([audio_feats, np.zeros([-diff, audio_feats.shape[-1]], dtype=audio_feats.dtype)])
-            elif diff > 0:
-                audio_feats = audio_feats[:-diff]
-        return video_feats, audio_feats
+        audio_feats = self._align_audio_to_video(audio_feats, video_feats)
+        audio_clean_feats = self._align_audio_to_video(
+            audio_clean_feats, video_feats
+        )
+        return video_feats, audio_feats, audio_clean_feats
 
     def load_video(self, audio_name):
         feats = custom_utils.load_video(os.path.join(self.audio_root, audio_name))
@@ -357,14 +393,44 @@ class AVHubertDataset(FairseqDataset):
         return mixed
 
     def __getitem__(self, index):
-        video_feats, audio_feats = self.load_feature(self.names[index])
-        audio_feats, video_feats = torch.from_numpy(audio_feats.astype(np.float32)) if audio_feats is not None else None, torch.from_numpy(video_feats.astype(np.float32)) if video_feats is not None else None
+        video_feats, audio_feats, audio_clean_feats = self.load_feature(
+            self.names[index]
+        )
+        audio_feats = (
+            torch.from_numpy(audio_feats.astype(np.float32))
+            if audio_feats is not None
+            else None
+        )
+        audio_clean_feats = (
+            torch.from_numpy(audio_clean_feats.astype(np.float32))
+            if audio_clean_feats is not None
+            else None
+        )
+        video_feats = (
+            torch.from_numpy(video_feats.astype(np.float32))
+            if video_feats is not None
+            else None
+        )
         if self.normalize and 'audio' in self.modalities:
             with torch.no_grad():
-                audio_feats = F.layer_norm(audio_feats, audio_feats.shape[1:])
+                if audio_feats is not None:
+                    audio_feats = F.layer_norm(
+                        audio_feats, audio_feats.shape[1:]
+                    )
+                if audio_clean_feats is not None:
+                    audio_clean_feats = F.layer_norm(
+                        audio_clean_feats, audio_clean_feats.shape[1:]
+                    )
         labels = self.get_labels(index)
         fid = self.names[index][1].split(':')[1]
-        return {"id": index, 'fid': fid, "video_source": video_feats, 'audio_source': audio_feats, "label_list": labels}
+        return {
+            "id": index,
+            "fid": fid,
+            "video_source": video_feats,
+            "audio_source": audio_feats,
+            "audio_clean_source": audio_clean_feats,
+            "label_list": labels,
+        }
 
     def __len__(self):
         return len(self.sizes)
@@ -410,6 +476,12 @@ class AVHubertDataset(FairseqDataset):
             collated_videos, padding_mask, audio_starts = self.collater_audio(video_source, audio_size, audio_starts)
         else:
             collated_videos = None
+        audio_clean_source = [s.get("audio_clean_source") for s in samples]
+        collated_clean_audios = None
+        if audio_clean_source and audio_clean_source[0] is not None:
+            collated_clean_audios, _, _ = self.collater_audio(
+                audio_clean_source, audio_size, audio_starts
+            )
         targets_by_label = [
             [s["label_list"][i] for s in samples]
             for i in range(self.num_labels)
@@ -418,6 +490,8 @@ class AVHubertDataset(FairseqDataset):
             targets_by_label, audio_size, audio_starts
         )
         source = {"audio": collated_audios, "video": collated_videos}
+        if collated_clean_audios is not None:
+            source["audio_clean"] = collated_clean_audios
         net_input = {"source": source, "padding_mask": padding_mask}
         batch = {
             "id": torch.LongTensor([s["id"] for s in samples]),

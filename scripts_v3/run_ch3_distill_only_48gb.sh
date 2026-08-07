@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 #SBATCH --time=8-00:00:00
 #SBATCH --partition=ifn
-#SBATCH --gres=gpu:pro6000b_96gb:1
+#SBATCH --gres=gpu:pro6000b_48gb:1
+#SBATCH --qos=low
 #SBATCH --exclude=gpu[04,05]
 #SBATCH --cpus-per-task=32
-#SBATCH --comment=force_cpus
 #SBATCH --ntasks-per-node=1
 #SBATCH --mem=64gb
 #SBATCH --job-name=ch3-v3-distill
@@ -119,7 +119,7 @@ case "$root_path" in "${output_root}"/*) ;; *) ch3_fail "output escaped Chapter 
 teacher="${CH3_TEACHER_CHECKPOINT:-/home/zhengyangli/work/av_hubert_pre_trained_models/phd_thesis/base_vox_iter5.pt}"
 data="${CH3_DATA_PATH:-/beegfs/data/shared/lrs3/433h_data_avhubert}"
 tokenizer="${CH3_TOKENIZER_PATH:-/beegfs/data/shared/lrs3/spm1000/spm_unigram1000.model}"
-workers="${CH3_WORKERS:-24}"
+workers="${CH3_WORKERS:-30}"
 gpus="${CH3_GPUS:-1}"
 user_dir="${project_path}/chapter3_distill_only"
 

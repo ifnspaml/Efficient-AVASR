@@ -20,16 +20,14 @@ ch3_validate_name() {
 }
 
 ch3_validate_positive_float() {
-    python - "$1" <<'PY'
-import math
-import sys
-
-try:
-    value = float(sys.argv[1])
-except ValueError:
-    raise SystemExit(1)
-raise SystemExit(0 if math.isfinite(value) and value > 0 else 1)
-PY
+    # Pure awk: must work before conda activate (Slurm nodes often have no bare `python`).
+    local value=$1
+    [[ -n "$value" ]] || return 1
+    awk -v v="$value" 'BEGIN {
+        if (v !~ /^[+-]?([0-9]+([.][0-9]*)?|[.][0-9]+)([eE][+-]?[0-9]+)?$/) exit 1
+        n = v + 0
+        exit (n == n && n > 0) ? 0 : 1
+    }'
 }
 
 ch3_print_command() {
@@ -54,11 +52,37 @@ ch3_require_checkpoint() {
 ch3_require_loadable_checkpoint() {
     local checkpoint=$1 label=$2
     ch3_require_checkpoint "$checkpoint" "$label"
+    # Fairseq checkpoints pickle fairseq classes. Loading them can trigger a
+    # circular import via fairseq.data; stub those types for this sanity check.
+    local root="${project_path:-${CH3_PROJECT_PATH:-$PWD}}"
+    PYTHONPATH="${root}/fairseq:${root}/avhubert:${root}${PYTHONPATH:+:${PYTHONPATH}}" \
     python - "$checkpoint" <<'PY'
+import pickle
 import sys
 import torch
 
-value = torch.load(sys.argv[1], map_location="cpu", weights_only=False)
+# Subclass instead of assigning Unpickler.find_class (immutable on modern CPython).
+class _Unpickler(pickle.Unpickler):
+    def find_class(self, module, name):
+        if module.startswith("fairseq"):
+            return type(name, (), {"__setstate__": lambda self, state: None})
+        return super().find_class(module, name)
+
+
+class _PickleModule:
+    Unpickler = _Unpickler
+    # torch may call these directly
+    load = staticmethod(lambda *a, **k: pickle.load(*a, **k))
+    dumps = staticmethod(pickle.dumps)
+    loads = staticmethod(pickle.loads)
+
+
+value = torch.load(
+    sys.argv[1],
+    map_location="cpu",
+    weights_only=False,
+    pickle_module=_PickleModule,
+)
 if not isinstance(value, dict) or "model" not in value:
     raise SystemExit("checkpoint is not a Fairseq model checkpoint")
 PY
