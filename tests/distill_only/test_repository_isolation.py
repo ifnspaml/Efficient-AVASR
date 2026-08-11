@@ -10,7 +10,6 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 BASELINE = "4502130ce4470fe8b0456fd5b466bef043f383f9"
 PROTECTED = (
-    "avhubert/hubert_distill.py",
     "avhubert/hubert_distill_criterion.py",
     "avhubert/prune.py",
     "avhubert/merge.py",
@@ -19,6 +18,7 @@ PROTECTED = (
     "scripts/run_pruning_merging.sh",
     "scripts/run_merging.sh",
 )
+V3_BASELINE = "38a22cec4c7000cba0de0feb6863ac0fc20cc5c9"
 REMOVED_MODULES = (
     "build_fairseq_runtime.py",
     "checkpoint_audit.py",
@@ -64,6 +64,36 @@ class RepositoryIsolationTest(unittest.TestCase):
             (ROOT / relative).read_bytes(),
             git("show", f"{BASELINE}:{relative}"),
         )
+
+    def test_completed_a_l_and_existing_v3_joint_files_are_unchanged(self) -> None:
+        protected = []
+        for directory in (
+            "avhubert/conf/distill_v3/distill_only",
+            "avhubert/conf/distill_v3/joint_dp_stage1",
+            "avhubert/conf/distill_v3/joint_dp_stage2",
+        ):
+            protected.extend(
+                git("ls-tree", "-r", "--name-only", V3_BASELINE, directory)
+                .decode()
+                .splitlines()
+            )
+        protected.extend(
+            (
+                "scripts_v3/run_ch3_distill_only.sh",
+                "scripts_v3/run_ch3_distill_only_48gb.sh",
+                "scripts_v3/run_ch3_joint_dp.sh",
+                "scripts_v3/run_ch3_joint_dp_48gb.sh",
+                "scripts/run_distill_only.sh",
+                "scripts/run_distill_only_fine-tuning.sh",
+                "scripts/run_distill_only_inference.sh",
+            )
+        )
+        for relative in protected:
+            with self.subTest(path=relative):
+                self.assertEqual(
+                    (ROOT / relative).read_bytes(),
+                    git("show", f"{V3_BASELINE}:{relative}"),
+                )
 
     def test_legacy_modules_and_launchers_are_absent(self) -> None:
         package = ROOT / "chapter3_distill_only"

@@ -13,8 +13,15 @@ from fairseq.models.hubert.hubert import MASKING_DISTRIBUTION_CHOICES
 
 from omegaconf import II, MISSING, open_dict
 
+try:
+    from .historical_prediction_heads import HistoricalPredictionHeads
+except ImportError:  # Fairseq user-dir modules are also imported top-level.
+    from historical_prediction_heads import HistoricalPredictionHeads
 
-DISTILL_MODE_CHOICES = ChoiceEnum(["layer2layer", "predlayer"])
+
+DISTILL_MODE_CHOICES = ChoiceEnum(
+    ["layer2layer", "predlayer", "historical_pred_heads"]
+)
 
 @dataclass
 class AVHubertDistillConfig(FairseqDataclass):
@@ -92,7 +99,10 @@ class AVHubertDistillConfig(FairseqDataclass):
     )
     distill_mode: DISTILL_MODE_CHOICES = field(
         default="layer2layer",
-        metadata={"help": "distillation method: choose between 'layer2layer' and 'predlayer'"},
+        metadata={
+            "help": "distillation method: 'layer2layer', legacy 'predlayer', "
+            "or Stage-L-equivalent 'historical_pred_heads'"
+        },
     )
     pruning_units: str = field(
         default="",
@@ -239,6 +249,14 @@ class AVHubertDistill(BaseFairseqModel):
                     nn.GELU(),
                 ) for _ in range(len(distill_layers))
             )
+        elif cfg.distill_mode == "historical_pred_heads":
+            # Stage-L semantics: expand the final student representation into
+            # independent target chunks, apply GELU, then project each chunk.
+            distill_linear_projs = HistoricalPredictionHeads(
+                student_dim=student_embed_dim,
+                teacher_dim=teacher_embed_dim,
+                target_layers=distill_layers,
+            )
         else:
             raise ValueError(f"Invalid distill mode: {cfg.distill_mode}")
         
@@ -264,16 +282,26 @@ class AVHubertDistill(BaseFairseqModel):
                 [teacher_hiddens[idx] for idx in self.distill_layers], dim=1
             )   # (batch, layer, time, feature)
         
-        student_hiddens = self.student.extract_intermediate_features(source=kwargs["source"], padding_mask=kwargs["padding_mask"])
-        new_student_hiddens = []
-        for idx, proj in zip(self.distill_layers, self.distill_linear_projs):
-            if self.distill_mode == "layer2layer":
-                new_student_hiddens.append(proj(student_hiddens[idx]))
-            elif self.distill_mode == "predlayer":
-                new_student_hiddens.append(proj(student_hiddens[-1]))
-            else:
-                raise ValueError(f"Invalid distill mode: {self.distill_mode}")
-        student_hiddens = torch.stack(new_student_hiddens, dim=1)   # (batch, layer, time, feature)
+        if self.distill_mode == "historical_pred_heads":
+            # Use the normal encoder forward so this is the true final student
+            # representation, including the final encoder LayerNorm when used.
+            student_final, _ = self.student.extract_features(
+                source=kwargs["source"],
+                padding_mask=kwargs["padding_mask"],
+                mask=False,
+            )
+            student_hiddens = self.distill_linear_projs(student_final)
+        else:
+            student_hiddens = self.student.extract_intermediate_features(source=kwargs["source"], padding_mask=kwargs["padding_mask"])
+            new_student_hiddens = []
+            for idx, proj in zip(self.distill_layers, self.distill_linear_projs):
+                if self.distill_mode == "layer2layer":
+                    new_student_hiddens.append(proj(student_hiddens[idx]))
+                elif self.distill_mode == "predlayer":
+                    new_student_hiddens.append(proj(student_hiddens[-1]))
+                else:
+                    raise ValueError(f"Invalid distill mode: {self.distill_mode}")
+            student_hiddens = torch.stack(new_student_hiddens, dim=1)   # (batch, layer, time, feature)
 
         return {"teacher_hiddens": teacher_hiddens, "student_hiddens": student_hiddens}
 

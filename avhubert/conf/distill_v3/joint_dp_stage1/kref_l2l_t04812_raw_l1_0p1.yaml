@@ -1,0 +1,2 @@
+# @package _global_
+defaults: [base_joint_dp_50k, stage_k_matrix/kref_l2l_t04812_raw_l1_0p1]
