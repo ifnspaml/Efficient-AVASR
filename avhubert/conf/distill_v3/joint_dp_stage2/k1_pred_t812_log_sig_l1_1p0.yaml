@@ -1,0 +1,2 @@
+# @package _global_
+defaults: [base_post_distill_25k, stage_k_matrix/k1_pred_t812_log_sig_l1_1p0]

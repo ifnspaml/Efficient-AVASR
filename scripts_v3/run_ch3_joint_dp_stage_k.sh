@@ -43,6 +43,7 @@ stage2_input_override=""
 export_input_override=""
 finetune_input_override=""
 evaluation_input_override=""
+historical_kref_root_override=""
 project_path="${CH3_PROJECT_PATH:-$(cd "${script_dir}/.." && pwd)}"
 
 usage() {
@@ -73,6 +74,7 @@ Checkpoint overrides for an explicitly selected stage:
   --export-input-checkpoint PATH
   --finetune-input-checkpoint PATH
   --evaluation-input-checkpoint PATH
+  --historical-kref-root PATH           default: exp/distill/resnet
 EOF
 }
 
@@ -98,6 +100,7 @@ while [[ $# -gt 0 ]]; do
         --export-input-checkpoint) ch3_need_value "$@"; export_input_override=$2; shift 2 ;;
         --finetune-input-checkpoint) ch3_need_value "$@"; finetune_input_override=$2; shift 2 ;;
         --evaluation-input-checkpoint) ch3_need_value "$@"; evaluation_input_override=$2; shift 2 ;;
+        --historical-kref-root) ch3_need_value "$@"; historical_kref_root_override=$2; shift 2 ;;
         --resume) resume=true; shift ;;
         --dry-run) dry_run=true; shift ;;
         --help|-h) usage; exit 0 ;;
@@ -149,6 +152,28 @@ evaluation_path="${finetune_path}/evaluations/${evaluation_name}"
 metadata_path="${root_path}/run_metadata.json"
 case "$root_path" in "${output_root}"/*) ;; *) ch3_fail "output escaped Stage-K root" ;; esac
 
+reuse_historical_kref=false
+encoder_source=stage-k
+stage1_resolved="${joint_path}/.hydra/config.yaml"
+stage2_resolved="${post_path}/.hydra/config.yaml"
+if [[ "$experiment" == k-ref ]]; then
+    reuse_historical_kref=true
+    encoder_source=historical-kref
+    historical_kref_root="${historical_kref_root_override:-${CH3_HISTORICAL_KREF_ROOT:-${project_path}/exp/distill/resnet}}"
+    [[ "$historical_kref_root" == /* ]] || historical_kref_root="${project_path}/${historical_kref_root}"
+    joint_checkpoint="${historical_kref_root}/checkpoints/checkpoint_last.pt"
+    pruned_checkpoint="${historical_kref_root}/checkpoints/pruned_checkpoint_last.pt"
+    post_checkpoint="${historical_kref_root}/final/checkpoints/checkpoint_last.pt"
+    export_checkpoint="${historical_kref_root}/final/checkpoints/pruned_checkpoint_last_final.pt"
+    stage1_resolved="${historical_kref_root}/.hydra/config.yaml"
+    stage2_resolved="${historical_kref_root}/final/.hydra/config.yaml"
+    case "$stage" in
+        joint_dp|prune|post_distill|export)
+            ch3_fail "K-ref encoder learning is reused from ${historical_kref_root}; run stage finetune, evaluate, or all"
+            ;;
+    esac
+fi
+
 teacher="${teacher_override:-${CH3_TEACHER_CHECKPOINT:-/home/zhengyangli/work/av_hubert_pre_trained_models/phd_thesis/base_vox_iter5.pt}}"
 stage1_student="${stage1_student_override:-$teacher}"
 prune_input="${prune_input_override:-$joint_checkpoint}"
@@ -156,6 +181,12 @@ stage2_input="${stage2_input_override:-$pruned_checkpoint}"
 export_input="${export_input_override:-$post_checkpoint}"
 finetune_input="${finetune_input_override:-$export_checkpoint}"
 evaluation_input="${evaluation_input_override:-$finetune_checkpoint}"
+if [[ "$reuse_historical_kref" == true ]] &&
+   [[ -n "$teacher_override" || -n "$stage1_student_override" ||
+      -n "$prune_input_override" || -n "$stage2_input_override" ||
+      -n "$export_input_override" || -n "$finetune_input_override" ]]; then
+    ch3_fail "K-ref encoder provenance is fixed; use --historical-kref-root instead of encoder checkpoint overrides"
+fi
 data="${CH3_DATA_PATH:-/beegfs/data/shared/lrs3/433h_data_avhubert}"
 tokenizer="${CH3_TOKENIZER_PATH:-/beegfs/data/shared/lrs3/spm1000/spm_unigram1000.model}"
 noise="${CH3_NOISE_PATH:-/beegfs/data/shared/lrs3/noise/musan/tsv/all}"
@@ -172,6 +203,10 @@ source_dirty=false
 [[ "$source_branch" == ch3-distill-only-v3 ]] || ch3_fail "must run from ch3-distill-only-v3, got $source_branch"
 
 selected_stage() {
+    if [[ "$stage" == all && "$reuse_historical_kref" == true ]]; then
+        [[ "$1" == finetune || "$1" == evaluate ]]
+        return
+    fi
     [[ "$stage" == "$1" || "$stage" == all ]]
 }
 
@@ -213,6 +248,7 @@ record_metadata() {
         --cosine "$cosine"
         --stage1-l1 "$stage1_l1"
         --stage2-l1 "$stage2_l1"
+        --encoder-source "$encoder_source"
         --teacher "$teacher"
         --student-input "$stage1_student"
         --joint-checkpoint "$joint_checkpoint"
@@ -225,8 +261,8 @@ record_metadata() {
         --export-input "$export_input"
         --finetune-input "$finetune_input"
         --evaluation-input "$evaluation_input"
-        --stage1-resolved "${joint_path}/.hydra/config.yaml"
-        --stage2-resolved "${post_path}/.hydra/config.yaml"
+        --stage1-resolved "$stage1_resolved"
+        --stage2-resolved "$stage2_resolved"
         --finetune-config "$finetune_config"
         --run-name "$run_name"
         --finetune-lr "$finetune_lr"
@@ -326,6 +362,11 @@ run_evaluate() {
 printf 'Scientific context: %s\n' "$CH3_CONTEXT_URL"
 printf 'Branch: %s\nGit commit: %s\nGit dirty: %s\n' "$source_branch" "$source_commit" "$source_dirty"
 printf 'Experiment: %s\nOutput ID: %s\nStage: %s\nSeed: %s\n' "$experiment" "$output_id" "$stage" "$seed"
+if [[ "$reuse_historical_kref" == true ]]; then
+    printf 'Encoder learning: reuse historical K-ref (no new 50k+25k encoder run)\nHistorical K-ref root: %s\n' "$historical_kref_root"
+else
+    printf 'Encoder learning: new Stage-K 50k+25k run\n'
+fi
 printf 'Stage-1 config: %s\nStage-2 config: %s\n' "$stage1_config" "$stage2_config"
 printf 'Matching: %s\nTeacher targets: {%s}\nCosine: %s\n' "$matching" "$targets" "$cosine"
 printf 'L1: Stage 1=%s Stage 2=%s\nPruning units: conv,head,interm\nTarget sparsity: 0.70\n' "$stage1_l1" "$stage2_l1"
@@ -334,7 +375,7 @@ printf 'Stage-2 protocol: updates=25000 clip_norm=10.0 update_freq=4 noise_prob=
 printf 'Teacher checkpoint: %s\nStage-1 student input: %s\nJoint checkpoint: %s\n' "$teacher" "$stage1_student" "$joint_checkpoint"
 printf 'Prune input: %s\nPruned checkpoint: %s\nStage-2 input: %s\nStage-2 checkpoint: %s\n' "$prune_input" "$pruned_checkpoint" "$stage2_input" "$post_checkpoint"
 printf 'Export input: %s\nExported student: %s\nFine-tune input: %s\nFine-tuned checkpoint: %s\n' "$export_input" "$export_checkpoint" "$finetune_input" "$finetune_checkpoint"
-printf 'Resolved Hydra configs: %s ; %s\n' "${joint_path}/.hydra/config.yaml" "${post_path}/.hydra/config.yaml"
+printf 'Resolved Hydra configs: %s ; %s\n' "$stage1_resolved" "$stage2_resolved"
 printf 'Output root: %s\nMetadata: %s\n' "$root_path" "$metadata_path"
 printf 'Fine-tuning: run=%s updates=60000 freeze=48000 lr=%s clip_norm=0.0 update_freq=8 noise_prob=0.25 noise_snr=0dB\n' "$run_name" "$finetune_lr"
 printf 'Evaluation: phase=%s subsets=%s protocol=%s output=%s\n' "$evaluation_phase" "$evaluation_subsets" "$evaluation_protocol" "$evaluation_path"
@@ -354,10 +395,12 @@ case "$stage" in
     finetune) run_finetune ;;
     evaluate) run_evaluate ;;
     all)
-        run_joint_dp
-        run_prune
-        run_post_distill
-        run_export
+        if [[ "$reuse_historical_kref" != true ]]; then
+            run_joint_dp
+            run_prune
+            run_post_distill
+            run_export
+        fi
         run_finetune
         run_evaluate
         ;;

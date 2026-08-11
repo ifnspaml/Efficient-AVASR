@@ -42,16 +42,16 @@ regularization, expected/target sparsity, and Lagrange multipliers. Hydra stores
 the resolved configuration. Physical pruning additionally writes total and
 component realized sparsity into `run_metadata.json`.
 
-## Immutable matrix
+## Corrected matrix
 
 | ID | Stage 1 config | Stage 2 config | Matching | Teacher targets | Cosine | L1 Stage 1 | L1 Stage 2 |
 |---|---|---|---|---|---:|---:|---:|
-| K-ref | `kref_l2l_t04812_raw_l1_0p1.yaml` | `kref_l2l_t04812_raw_l1_0p1.yaml` | layer-to-layer | `{0,4,8,12}` | raw | 0.1 | 0.1 |
-| K-T | `kt_l2l_t812_raw_l1_0p1.yaml` | `kt_l2l_t812_raw_l1_0p1.yaml` | layer-to-layer | `{8,12}` | raw | 0.1 | 0.1 |
-| K0 | `k0_pred_t812_raw_l1_0p1.yaml` | `k0_pred_t812_raw_l1_0p1.yaml` | historical prediction heads | `{8,12}` | raw | 0.1 | 0.1 |
-| K1 | `k1_pred_t812_log_sig_l1_0p1.yaml` | `k1_pred_t812_log_sig_l1_0p1.yaml` | historical prediction heads | `{8,12}` | log_sig | 0.1 | 0.1 |
-| K2 | `k2_pred_t812_raw_l1_0p1.yaml` | `k2_pred_t812_raw_l1_1p0.yaml` | historical prediction heads | `{8,12}` | raw | 0.1 | 1.0 |
-| K3 | `k3_pred_t812_log_sig_l1_0p1.yaml` | `k3_pred_t812_log_sig_l1_1p0.yaml` | historical prediction heads | `{8,12}` | log_sig | 0.1 | 1.0 |
+| K-ref | `kref_l2l_t04812_raw_l1_0p1.yaml` | `kref_l2l_t04812_raw_l1_1p0.yaml` | layer-to-layer | `{0,4,8,12}` | raw | 0.1 | 1.0 |
+| K-T | `kt_l2l_t812_raw_l1_0p1.yaml` | `kt_l2l_t812_raw_l1_1p0.yaml` | layer-to-layer | `{8,12}` | raw | 0.1 | 1.0 |
+| K0 | `k0_pred_t812_raw_l1_0p1.yaml` | `k0_pred_t812_raw_l1_1p0.yaml` | historical prediction heads | `{8,12}` | raw | 0.1 | 1.0 |
+| K1 | `k1_pred_t812_log_sig_l1_0p1.yaml` | `k1_pred_t812_log_sig_l1_1p0.yaml` | historical prediction heads | `{8,12}` | log_sig | 0.1 | 1.0 |
+| K2 | `k2_pred_t812_raw_l1_0p1.yaml` | `k2_pred_t812_raw_l1_0p1.yaml` | historical prediction heads | `{8,12}` | raw | 0.1 | 0.1 |
+| K3 | `k3_pred_t812_log_sig_l1_0p1.yaml` | `k3_pred_t812_log_sig_l1_0p1.yaml` | historical prediction heads | `{8,12}` | log_sig | 0.1 | 0.1 |
 
 All Stage-1 configs inherit the unchanged v3 50k base and set hybrid
 `conv,head,interm` pruning at target sparsity 0.70. All Stage-2 configs inherit
@@ -63,19 +63,64 @@ The controlled comparisons are:
 1. K-ref vs K-T: target set only, `{0,4,8,12}` vs `{8,12}` under layer-to-layer matching.
 2. K-T vs K0: matching only, layer-to-layer vs historical prediction heads at `{8,12}`.
 3. K-ref vs K0: full transfer of the Stage-L target and prediction-head principle.
-4. K0 vs K1: raw vs log_sig cosine with L1 `0.1 → 0.1`.
-5. K0 vs K2: Stage-2 L1 0.1 vs 1.0 with raw cosine.
-6. K1 vs K3: Stage-2 L1 0.1 vs 1.0 with log_sig cosine.
-7. K2 vs K3: raw vs log_sig cosine with L1 `0.1 → 1.0`.
+4. K0 vs K1: raw vs log_sig cosine with L1 `0.1 → 1.0`.
+5. K0 vs K2: Stage-2 L1 1.0 vs 0.1 with raw cosine.
+6. K1 vs K3: Stage-2 L1 1.0 vs 0.1 with log_sig cosine.
+7. K2 vs K3: raw vs log_sig cosine with L1 `0.1 → 0.1`.
 
 Automated config tests compare fully composed dictionaries and enforce exactly
 those field differences.
 
+## Historical K-ref encoder audit and reuse
+
+K-ref is the historical `exp/distill/resnet` encoder recipe, not a new 75k
+encoder-learning run. The audit used the launcher, the stored resolved Hydra
+snapshots, the completion logs, and the checkpoint chain:
+
+| Property | Historical resolved value |
+|---|---|
+| Matching / targets | `layer2layer`, `0.4,8,12` (frontend 0 plus Transformer layers 4, 8, and 12) |
+| Stage-1 loss | raw cosine, L1 0.1 |
+| Stage-2 loss | raw cosine, L1 1.0 |
+| Pruning | `conv,head,interm`, target sparsity 0.70, 10k sparsity warm-up |
+| Budget | 50k joint DP + materialization + 25k post-distillation |
+| Optimization | the same composite Stage-1 and Adam/polynomial Stage-2 settings; launcher-resolved `update_freq=[4]`, `clip_norm=10.0` |
+| Teacher / initialization | `base_vox_iter5.pt` for both teacher and initial student |
+| Data / noise / seed | LRS3 433h, MUSAN training noise probability 0.25 at 0 dB, seed 1337 |
+
+The logs record termination exactly at 50,000 and 25,000 updates. The final
+materialized encoder is loadable by the current Stage-K runtime:
+
+```text
+exp/distill/resnet/final/checkpoints/pruned_checkpoint_last_final.pt
+```
+
+The Stage-K launcher treats this historical chain as read-only. For `k-ref`,
+`--stage all` skips joint DP, pruning, post-distillation, and export, then runs
+the common Chapter-3 fine-tuning and evaluation stages. Direct K-ref encoder
+stage requests are rejected to prevent accidental retraining. An alternative
+historical root can be audited/debugged with `--historical-kref-root PATH` or
+`CH3_HISTORICAL_KREF_ROOT`; it does not change the K-ref scientific definition.
+
+The historical run did not record its Git SHA. Its stored resolved configs,
+logs, checkpoint timestamps, and loadability establish protocol/checkpoint
+provenance, but the missing original SHA remains a reproducibility caveat.
+
+The existing `exp/finetune/asr/resnet_lr5e-4` downstream run also resolves to
+60k updates, a 48k encoder freeze, LR 0.0005, `update_freq=[8]`, clip norm 0.0,
+noise probability 0.25 at 0 dB, and seed 1337. Its stored ITU-T outputs cover
+validation and test for babble, speech, and music at -10, -5, 0, +5, and
++10 dB. It is numerically protocol-compatible, but it predates Stage-K's
+isolated metadata and validation-screening workflow. The command below reruns
+the matched downstream path inside `exp/chapter3_joint_dp/k_ref/` so selection
+can be recorded from validation screening before test reporting.
+
 ## Launcher and isolated outputs
 
 The dedicated interface is `scripts_v3/run_ch3_joint_dp_stage_k.sh`. It never
-calls `scripts/run_pruning.sh` and never uses an A/L or historical joint-DP
-result directory. Outputs are isolated as:
+calls `scripts/run_pruning.sh` and never writes to an A/L or historical joint-DP
+result directory. The historical K-ref directory is a read-only encoder input.
+New outputs are isolated as:
 
 ```text
 exp/chapter3_joint_dp/
@@ -95,7 +140,8 @@ rejected. The metadata records the Git branch/SHA/dirty flag, experiment and
 seed, both config paths, resolved Hydra output paths, every checkpoint, fixed
 protocol, fine-tuning config, and evaluation selection policy.
 
-Dry-run all six without submitting GPU jobs:
+Dry-run all six without submitting GPU jobs. K-ref prints the historical
+checkpoint chain and skips encoder-learning commands:
 
 ```bash
 for experiment in k-ref k-t k0 k1 k2 k3; do
@@ -105,12 +151,13 @@ for experiment in k-ref k-t k0 k1 k2 k3; do
 done
 ```
 
-Submit one experiment only after reviewing its dry-run:
+Submit one of the five new encoder-learning experiments only after reviewing
+its dry-run:
 
 ```bash
 sbatch --export=ALL,CH3_PROJECT_PATH="$PWD" \
   scripts_v3/run_ch3_joint_dp_stage_k.sh \
-  --experiment k0 --stage all --seed 1337 \
+  --experiment k-t --stage all --seed 1337 \
   --finetune-run-name lr5e-4 --finetune-lr 0.0005
 ```
 
@@ -118,6 +165,18 @@ Individual stages are `joint_dp`, `prune`, `post_distill`, `export` (alias
 `save`), `finetune`, and `evaluate`. Stage-specific checkpoint override flags
 are listed by `--help`; overrides and any non-default fine-tuning LR are
 printed and recorded.
+
+Run matched K-ref downstream fine-tuning and validation screening from the
+reused historical encoder:
+
+```bash
+sbatch --export=ALL,CH3_PROJECT_PATH="$PWD" \
+  scripts_v3/run_ch3_joint_dp_stage_k.sh \
+  --experiment k-ref --stage all --seed 1337 \
+  --finetune-run-name lr5e-4 --finetune-lr 0.0005 \
+  --evaluation-phase screening --evaluation-subsets valid \
+  --evaluation-name screening-valid
+```
 
 ## Fine-tuning and evaluation
 

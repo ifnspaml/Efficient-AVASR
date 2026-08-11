@@ -23,12 +23,12 @@ CONFIG_ROOT = ROOT / "avhubert/conf/distill_v3"
 RUNNER = ROOT / "scripts_v3/run_ch3_joint_dp_stage_k.sh"
 ENV_PYTHON = Path("/home/zhengyangli/work_fast/envs/dpavhubert_pro6000/bin")
 MATRIX = {
-    "k-ref": ("kref_l2l_t04812_raw_l1_0p1", "kref_l2l_t04812_raw_l1_0p1", "layer2layer", "0.4,8,12", "raw", 0.1, 0.1),
-    "k-t": ("kt_l2l_t812_raw_l1_0p1", "kt_l2l_t812_raw_l1_0p1", "layer2layer", "8,12", "raw", 0.1, 0.1),
-    "k0": ("k0_pred_t812_raw_l1_0p1", "k0_pred_t812_raw_l1_0p1", "historical_pred_heads", "8,12", "raw", 0.1, 0.1),
-    "k1": ("k1_pred_t812_log_sig_l1_0p1", "k1_pred_t812_log_sig_l1_0p1", "historical_pred_heads", "8,12", "log_sig", 0.1, 0.1),
-    "k2": ("k2_pred_t812_raw_l1_0p1", "k2_pred_t812_raw_l1_1p0", "historical_pred_heads", "8,12", "raw", 0.1, 1.0),
-    "k3": ("k3_pred_t812_log_sig_l1_0p1", "k3_pred_t812_log_sig_l1_1p0", "historical_pred_heads", "8,12", "log_sig", 0.1, 1.0),
+    "k-ref": ("kref_l2l_t04812_raw_l1_0p1", "kref_l2l_t04812_raw_l1_1p0", "layer2layer", "0.4,8,12", "raw", 0.1, 1.0),
+    "k-t": ("kt_l2l_t812_raw_l1_0p1", "kt_l2l_t812_raw_l1_1p0", "layer2layer", "8,12", "raw", 0.1, 1.0),
+    "k0": ("k0_pred_t812_raw_l1_0p1", "k0_pred_t812_raw_l1_1p0", "historical_pred_heads", "8,12", "raw", 0.1, 1.0),
+    "k1": ("k1_pred_t812_log_sig_l1_0p1", "k1_pred_t812_log_sig_l1_1p0", "historical_pred_heads", "8,12", "log_sig", 0.1, 1.0),
+    "k2": ("k2_pred_t812_raw_l1_0p1", "k2_pred_t812_raw_l1_0p1", "historical_pred_heads", "8,12", "raw", 0.1, 0.1),
+    "k3": ("k3_pred_t812_log_sig_l1_0p1", "k3_pred_t812_log_sig_l1_0p1", "historical_pred_heads", "8,12", "log_sig", 0.1, 0.1),
 }
 
 
@@ -140,8 +140,8 @@ class PredictionHeadAuditTest(unittest.TestCase):
     def test_existing_layer2layer_and_predlayer_forward_paths_are_unchanged(self) -> None:
         import sys
 
-        sys.path.insert(0, str(ROOT / "avhubert"))
-        from hubert_distill import AVHubertDistill
+        sys.path.insert(0, str(ROOT))
+        from avhubert.hubert_distill import AVHubertDistill
 
         teacher_values = [torch.randn(2, 4, 3) for _ in range(3)]
         student_values = [torch.randn(2, 4, 3) for _ in range(3)]
@@ -182,7 +182,13 @@ class StageKLauncherTest(unittest.TestCase):
             output_id = "k_ref" if experiment == "k-ref" else ("k_t" if experiment == "k-t" else experiment)
             target = ROOT / f"exp/chapter3_joint_dp/{output_id}/seed_1337"
             self.assertFalse(target.exists())
-            result = run("--experiment", experiment, "--stage", "all", "--dry-run")
+            result = run(
+                "--experiment", experiment,
+                "--stage", "all",
+                "--evaluation-phase", "screening",
+                "--evaluation-subsets", "valid",
+                "--dry-run",
+            )
             self.assertEqual(result.returncode, 0, result.stderr)
             stage1_name, stage2_name, matching, layers, cosine, l1_first, l1_second = expected
             targets = "0,4,8,12" if layers == "0.4,8,12" else layers
@@ -202,7 +208,44 @@ class StageKLauncherTest(unittest.TestCase):
             ):
                 self.assertIn(text, result.stdout)
             self.assertEqual(result.stdout.count("avhubert/infer_s2s.py"), 3)
+            if experiment == "k-ref":
+                self.assertIn(
+                    "Encoder learning: reuse historical K-ref "
+                    "(no new 50k+25k encoder run)",
+                    result.stdout,
+                )
+                self.assertIn(
+                    "exp/distill/resnet/final/checkpoints/"
+                    "pruned_checkpoint_last_final.pt",
+                    result.stdout,
+                )
+                self.assertEqual(result.stdout.count("fairseq-hydra-train"), 1)
+            else:
+                self.assertIn(
+                    "Encoder learning: new Stage-K 50k+25k run",
+                    result.stdout,
+                )
+                self.assertEqual(result.stdout.count("fairseq-hydra-train"), 3)
             self.assertFalse(target.exists())
+
+    def test_kref_encoder_stages_are_blocked_because_history_is_reused(self) -> None:
+        for stage in ("joint_dp", "prune", "post_distill", "export"):
+            with self.subTest(stage=stage):
+                result = run(
+                    "--experiment", "k-ref", "--stage", stage, "--dry-run"
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("K-ref encoder learning is reused", result.stderr)
+
+    def test_kref_rejects_encoder_checkpoint_overrides(self) -> None:
+        result = run(
+            "--experiment", "k-ref",
+            "--stage", "finetune",
+            "--finetune-input-checkpoint", "/tmp/not-the-audited-kref.pt",
+            "--dry-run",
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("K-ref encoder provenance is fixed", result.stderr)
 
     def test_final_evaluation_defaults_to_full_valid_and_test_grid(self) -> None:
         result = run(

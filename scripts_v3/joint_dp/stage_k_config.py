@@ -28,12 +28,12 @@ class Experiment:
 MATRIX = {
     item.experiment_id: item
     for item in (
-        Experiment("k-ref", "k_ref", "kref_l2l_t04812_raw_l1_0p1", "kref_l2l_t04812_raw_l1_0p1", "layer2layer", "0,4,8,12", "raw", 0.1, 0.1),
-        Experiment("k-t", "k_t", "kt_l2l_t812_raw_l1_0p1", "kt_l2l_t812_raw_l1_0p1", "layer2layer", "8,12", "raw", 0.1, 0.1),
-        Experiment("k0", "k0", "k0_pred_t812_raw_l1_0p1", "k0_pred_t812_raw_l1_0p1", "historical_pred_heads", "8,12", "raw", 0.1, 0.1),
-        Experiment("k1", "k1", "k1_pred_t812_log_sig_l1_0p1", "k1_pred_t812_log_sig_l1_0p1", "historical_pred_heads", "8,12", "log_sig", 0.1, 0.1),
-        Experiment("k2", "k2", "k2_pred_t812_raw_l1_0p1", "k2_pred_t812_raw_l1_1p0", "historical_pred_heads", "8,12", "raw", 0.1, 1.0),
-        Experiment("k3", "k3", "k3_pred_t812_log_sig_l1_0p1", "k3_pred_t812_log_sig_l1_1p0", "historical_pred_heads", "8,12", "log_sig", 0.1, 1.0),
+        Experiment("k-ref", "k_ref", "kref_l2l_t04812_raw_l1_0p1", "kref_l2l_t04812_raw_l1_1p0", "layer2layer", "0,4,8,12", "raw", 0.1, 1.0),
+        Experiment("k-t", "k_t", "kt_l2l_t812_raw_l1_0p1", "kt_l2l_t812_raw_l1_1p0", "layer2layer", "8,12", "raw", 0.1, 1.0),
+        Experiment("k0", "k0", "k0_pred_t812_raw_l1_0p1", "k0_pred_t812_raw_l1_1p0", "historical_pred_heads", "8,12", "raw", 0.1, 1.0),
+        Experiment("k1", "k1", "k1_pred_t812_log_sig_l1_0p1", "k1_pred_t812_log_sig_l1_1p0", "historical_pred_heads", "8,12", "log_sig", 0.1, 1.0),
+        Experiment("k2", "k2", "k2_pred_t812_raw_l1_0p1", "k2_pred_t812_raw_l1_0p1", "historical_pred_heads", "8,12", "raw", 0.1, 0.1),
+        Experiment("k3", "k3", "k3_pred_t812_log_sig_l1_0p1", "k3_pred_t812_log_sig_l1_0p1", "historical_pred_heads", "8,12", "log_sig", 0.1, 0.1),
     )
 }
 

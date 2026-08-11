@@ -1,2 +1,0 @@
-# @package _global_
-defaults: [base_post_distill_25k, stage_k_matrix/kt_l2l_t812_raw_l1_0p1]

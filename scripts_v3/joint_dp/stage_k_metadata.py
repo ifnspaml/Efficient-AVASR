@@ -60,6 +60,7 @@ def record(args: argparse.Namespace) -> None:
         "stage2_config": str(args.stage2_config.resolve()),
         "teacher_checkpoint": args.teacher,
         "stage1_student_input": args.student_input,
+        "encoder_source": args.encoder_source,
     }
     value = _read(path)
     if value:
@@ -98,6 +99,11 @@ def record(args: argparse.Namespace) -> None:
                 "seed": args.seed,
                 "noise_probability": 0.25,
                 "noise_snr_db": 0,
+            },
+            "encoder_learning": {
+                "source": args.encoder_source,
+                "historical_checkpoint_reused": args.encoder_source
+                == "historical-kref",
             },
             "checkpoints": {
                 "teacher": args.teacher,
@@ -211,6 +217,9 @@ def main() -> int:
     record_parser.add_argument("--cosine", required=True)
     record_parser.add_argument("--stage1-l1", type=float, required=True)
     record_parser.add_argument("--stage2-l1", type=float, required=True)
+    record_parser.add_argument(
+        "--encoder-source", choices=("stage-k", "historical-kref"), required=True
+    )
     record_parser.add_argument("--teacher", required=True)
     record_parser.add_argument("--student-input", required=True)
     record_parser.add_argument("--joint-checkpoint", required=True)
