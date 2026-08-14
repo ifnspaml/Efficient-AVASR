@@ -3,8 +3,17 @@ exp/
 env/
 docs/
 tests/
+!docs/
+docs/*
+!docs/chapter3_stage_j_joint_dp.md
+!tests/
+tests/*
+!tests/distill_only/
+tests/distill_only/*
+!tests/distill_only/test_stage_j_joint_dp.py
 log_old/
-
+docs/
+tests/
 # Slurm files
 *.out
 

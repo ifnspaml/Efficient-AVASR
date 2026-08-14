@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 #SBATCH --time=8-00:00:00
 #SBATCH --partition=ifn
-#SBATCH --gres=gpu:pro6000b_96gb:1
+#SBATCH --qos=low
+#SBATCH --gres=gpu:pro6000b_48gb:1
 #SBATCH --exclude=gpu[04,05]
 #SBATCH --cpus-per-task=32
 #SBATCH --ntasks-per-node=1
@@ -195,7 +196,7 @@ fi
 data="${CH3_DATA_PATH:-/beegfs/data/shared/lrs3/433h_data_avhubert}"
 tokenizer="${CH3_TOKENIZER_PATH:-/beegfs/data/shared/lrs3/spm1000/spm_unigram1000.model}"
 noise="${CH3_NOISE_PATH:-/beegfs/data/shared/lrs3/noise/musan/tsv/all}"
-workers="${CH3_WORKERS:-24}"
+workers="${CH3_WORKERS:-30}"
 gpus="${CH3_GPUS:-1}"
 user_dir="${project_path}/avhubert"
 finetune_config="${project_path}/avhubert/conf/av-finetune/base_noise_pt_noise_ft_433h.yaml"

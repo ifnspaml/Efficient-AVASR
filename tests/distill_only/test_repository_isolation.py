@@ -30,6 +30,15 @@ REMOVED_MODULES = (
     "selection.py",
     "source_worktree.py",
 )
+REPLACED_STAGE_J_STUBS = {
+    f"avhubert/conf/distill_v3/joint_dp_stage{stage}/{name}.yaml"
+    for stage in (1, 2)
+    for name in (
+        "j1_transformer_tau65",
+        "j2_hybrid_tau70",
+        "j3_hybrid_tau80",
+    )
+}
 
 
 def git(*arguments: str) -> bytes:
@@ -89,6 +98,8 @@ class RepositoryIsolationTest(unittest.TestCase):
             )
         )
         for relative in protected:
+            if relative in REPLACED_STAGE_J_STUBS:
+                continue
             with self.subTest(path=relative):
                 self.assertEqual(
                     (ROOT / relative).read_bytes(),

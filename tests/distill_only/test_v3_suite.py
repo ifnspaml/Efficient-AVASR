@@ -135,19 +135,14 @@ class V3ConfigTest(unittest.TestCase):
                 self.assertEqual(first["criterion"]["target_sparsity"], 0.70)
                 self.assertEqual(first["model"]["pruning_units"], "conv,head,interm")
 
-    def test_j_structure_and_loss_overrides(self) -> None:
-        expected = {
-            "j1_transformer_tau65": ("head,interm", 0.65),
-            "j2_hybrid_tau70": ("conv,head,interm", 0.70),
-            "j3_hybrid_tau80": ("conv,head,interm", 0.80),
-        }
-        overrides = ["criterion.cos_type=log_sig", "criterion.l1_weight=0.1"]
-        for name, structure in expected.items():
-            first = load("joint_dp_stage1", name, overrides)
-            second = load("joint_dp_stage2", name, overrides)
-            self.assertEqual((first["model"]["pruning_units"], first["criterion"]["target_sparsity"]), structure)
-            self.assertEqual(first["criterion"]["cos_type"], second["criterion"]["cos_type"])
-            self.assertEqual(first["criterion"]["l1_weight"], second["criterion"]["l1_weight"])
+    def test_unrun_stage_j_placeholders_were_retired(self) -> None:
+        for directory in ("joint_dp_stage1", "joint_dp_stage2"):
+            for name in (
+                "j1_transformer_tau65",
+                "j2_hybrid_tau70",
+                "j3_hybrid_tau80",
+            ):
+                self.assertFalse((CONFIG_ROOT / directory / f"{name}.yaml").exists())
 
 
 class V3LauncherTest(unittest.TestCase):
@@ -190,18 +185,12 @@ class V3LauncherTest(unittest.TestCase):
             self.assertIn(token, distill.stdout)
             self.assertIn(token, joint.stdout)
 
-    def test_k_and_j_loss_validation(self) -> None:
+    def test_legacy_launcher_does_not_accept_stage_j(self) -> None:
         mismatch = run(JOINT_RUNNER, ("--exp-name", "k0_hybrid_tau70_raw_cos_l1_0p1", "--stage", "joint_dp", "--cosine-type", "log_sig", "--dry-run"))
         self.assertNotEqual(mismatch.returncode, 0)
-        missing = run(JOINT_RUNNER, ("--exp-name", "j1_transformer_tau65", "--stage", "joint_dp", "--dry-run"))
-        self.assertNotEqual(missing.returncode, 0)
-        for weight in ("-0.1", "nan", "inf"):
-            invalid = run(JOINT_RUNNER, ("--exp-name", "j1_transformer_tau65", "--stage", "joint_dp", "--cosine-type", "raw", "--l1-weight", weight, "--dry-run"))
-            self.assertNotEqual(invalid.returncode, 0)
-        valid = run(JOINT_RUNNER, ("--exp-name", "j3_hybrid_tau80", "--stage", "all", "--cosine-type", "log_sig", "--l1-weight", "1.0", "--dry-run"))
-        self.assertEqual(valid.returncode, 0, valid.stderr)
-        self.assertEqual(valid.stdout.count("criterion.cos_type=log_sig"), 2)
-        self.assertEqual(valid.stdout.count("criterion.l1_weight=1"), 2)
+        for name in ("j1_transformer_tau65", "j2_hybrid_tau70", "j3_hybrid_tau80"):
+            result = run(JOINT_RUNNER, ("--exp-name", name, "--stage", "joint_dp", "--dry-run"))
+            self.assertNotEqual(result.returncode, 0)
 
     def test_final_registry_dry_run(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
